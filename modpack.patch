@@ -1,0 +1,4128 @@
+diff -Naur teeworlds-0.5.2-src/src/engine/e_if_server.h modpack/src/engine/e_if_server.h
+--- teeworlds-0.5.2-src/src/engine/e_if_server.h	2009-10-26 19:04:31.000000000 +0100
++++ modpack/src/engine/e_if_server.h	2010-05-25 20:36:35.000000000 +0200
+@@ -34,6 +34,7 @@
+ 		<other_func>
+ */
+ const char *server_clientname(int client_id);
++void server_generate_pw(int cid, char *gen_pw);
+ 
+ /* grabs the latest input for the client. not withholding anything */
+ 
+diff -Naur teeworlds-0.5.2-src/src/engine/e_network.c modpack/src/engine/e_network.c
+--- teeworlds-0.5.2-src/src/engine/e_network.c	2009-10-26 19:04:31.000000000 +0100
++++ modpack/src/engine/e_network.c	2010-05-25 20:55:10.000000000 +0200
+@@ -224,6 +224,13 @@
+ 
+ 	if(packet->flags&NET_PACKETFLAG_CONNLESS)
+ 	{
++
++		if(size < 6)
++		{
++			dbg_msg("BUG Fix: someone try to crash the server", "connection less packet too small, %d", size);
++			return -1;
++		}
++
+ 		packet->flags = NET_PACKETFLAG_CONNLESS;
+ 		packet->ack = 0;
+ 		packet->num_chunks = 0;
+diff -Naur teeworlds-0.5.2-src/src/engine/server/es_server.c modpack/src/engine/server/es_server.c
+--- teeworlds-0.5.2-src/src/engine/server/es_server.c	2009-10-26 19:04:31.000000000 +0100
++++ modpack/src/engine/server/es_server.c	2010-05-25 20:36:35.000000000 +0200
+@@ -19,7 +19,7 @@
+ #include <engine/e_packer.h>
+ #include <engine/e_datafile.h>
+ #include <engine/e_demorec.h>
+-
++#include <time.h>
+ #include <mastersrv/mastersrv.h>
+ 
+ #if defined(CONF_FAMILY_WINDOWS) 
+@@ -303,7 +303,7 @@
+ 
+ void server_kick(int client_id, const char *reason)
+ {
+-	if(client_id < 0 || client_id > MAX_CLIENTS)
++	if(client_id < 0 || client_id > MAX_CLIENTS || clients[client_id].authed)
+ 		return;
+ 		
+ 	if(clients[client_id].state != SRVCLIENT_STATE_EMPTY)
+@@ -636,6 +636,39 @@
+ 	reentry_guard--;
+ }
+ 
++void server_generate_pw(int cid, char *gen_pw)
++{
++	const char alpha[] = "0123456789abcdefghijklmnopqrstuvwxyzABCDEFGHIJKLMNOPQRSTUVWXYZ";
++	int name_offset = 0;
++	int pw_offset = 0;
++	int day = time(0)/86400;
++	int i;
++	int base = 1;
++	int offset_char = 0;
++	for(i = 0; i < 8; i++)
++	{
++
++		unsigned long long int tmp = 0;
++		int n;
++		for(n = 0; n < 4; n++)
++		{
++			if(config.sv_pro_password[i*4+n - pw_offset] == 0)
++				pw_offset = i*4+n;
++			if(clients[cid].name[i*4+n - name_offset] == 0)
++				name_offset = i*4+n;
++			if(pw_offset)
++				tmp += base * (((config.sv_pro_password[i*4+n - pw_offset] + clients[cid].name[i*4+n - name_offset]+offset_char)%128) * (clients[cid].name[i*4+n - name_offset]) + ((day*i*4+n)%(32-i*4+n)));
++			else
++				tmp += base * (((config.sv_pro_password[i*4+n - pw_offset]+offset_char)%128) * (clients[cid].name[i*4+n - name_offset]) + ((day*i*4+n)%(32-i*4+n)));
++			base += 13;
++			offset_char += 3;
++		}
++		gen_pw[i] = alpha[tmp%(strlen(alpha)-1)];
++	}
++	gen_pw[8] = 0;
++	dbg_msg("generated_pw","%s", gen_pw);
++}
++
+ static void server_process_client_packet(NETCHUNK *packet)
+ {
+ 	int cid = packet->client_id;
+@@ -650,8 +683,10 @@
+ 		{
+ 			char version[64];
+ 			const char *password;
++			int player_count = 0;
++			int i;
+ 			str_copy(version, msg_unpack_string(), 64);
+-			if(strcmp(version, mods_net_version()) != 0)
++			if(strcmp(version, config.sv_version_string) != 0)
+ 			{
+ 				/* OH FUCK! wrong version, drop him */
+ 				char reason[256];
+@@ -664,13 +699,42 @@
+ 			str_copy(clients[cid].clan, msg_unpack_string(), MAX_CLANNAME_LENGTH);
+ 			password = msg_unpack_string();
+ 			
+-			if(config.password[0] != 0 && strcmp(config.password, password) != 0)
++
++			for(i = 0; i < MAX_CLIENTS; i++)
++			{
++				if(clients[i].state != SRVCLIENT_STATE_EMPTY)
++					player_count++;
++			}
++			if(config.sv_reserved_slot_pass[0] != 0)
++			{
++				if(strcmp(config.sv_reserved_slot_pass, password) == 0)
++					goto correct_pw;
++				else if(config.sv_max_clients - player_count < config.sv_reserved_slots)
++				{
++					netserver_drop(net, cid, "Write the reserved slot password");
++					return;
++				}
++			}
++			if(config.sv_use_pro_pw)
++			{
++				if(strcmp(config.sv_pro_password, password) != 0)
++				{
++					char tmp_pw[9];
++					server_generate_pw(cid, tmp_pw);
++					if(strcmp(password, tmp_pw) != 0)
++					{
++						netserver_drop(net, cid, "wrong password");
++						return;
++					}
++				}
++			}
++			else if(config.password[0] != 0 && strcmp(config.password, password) != 0)
+ 			{
+ 				/* wrong password */
+ 				netserver_drop(net, cid, "wrong password");
+ 				return;
+ 			}
+-			
++		correct_pw:
+ 			clients[cid].state = SRVCLIENT_STATE_CONNECTING;
+ 			server_send_map(cid);
+ 		}
+@@ -914,7 +978,7 @@
+ 
+ 	/* flags */
+ 	i = 0;
+-	if(config.password[0])   /* password set */
++	if(config.password[0] || config.sv_use_pro_pw)   /* password set */
+ 		i |= SRVFLAG_PASSWORD;
+ 	str_format(buf, sizeof(buf), "%d", i);
+ 	packer_add_string(&p, buf, 2);
+@@ -923,8 +987,8 @@
+ 	str_format(buf, sizeof(buf), "%d", browseinfo_progression);
+ 	packer_add_string(&p, buf, 4);
+ 	
+-	str_format(buf, sizeof(buf), "%d", player_count); packer_add_string(&p, buf, 3);  /* num players */
+-	str_format(buf, sizeof(buf), "%d", netserver_max_clients(net)); packer_add_string(&p, buf, 3); /* max players */
++	str_format(buf, sizeof(buf), "%d", player_count > config.sv_max_clients?config.sv_max_clients : player_count); packer_add_string(&p, buf, 3);  /* num players */
++	str_format(buf, sizeof(buf), "%d", netserver_max_clients(net) - config.sv_reserved_slots); packer_add_string(&p, buf, 3); /* max players */
+ 
+ 	for(i = 0; i < MAX_CLIENTS; i++)
+ 	{
+@@ -1244,7 +1308,7 @@
+ 		NETADDR addr;
+ 		int cid = atoi(str);
+ 
+-		if(cid < 0 || cid > MAX_CLIENTS || clients[cid].state == SRVCLIENT_STATE_EMPTY)
++		if(cid < 0 || cid > MAX_CLIENTS || clients[cid].state == SRVCLIENT_STATE_EMPTY || clients[cid].authed)
+ 		{
+ 			dbg_msg("server", "invalid client id");
+ 			return;
+diff -Naur teeworlds-0.5.2-src/src/game/collision.cpp modpack/src/game/collision.cpp
+--- teeworlds-0.5.2-src/src/game/collision.cpp	2009-10-26 19:04:31.000000000 +0100
++++ modpack/src/game/collision.cpp	2010-05-25 20:36:35.000000000 +0200
+@@ -35,6 +35,60 @@
+ 			tiles[i].index = COLFLAG_SOLID;
+ 		else if(index == TILE_NOHOOK)
+ 			tiles[i].index = COLFLAG_SOLID|COLFLAG_NOHOOK;
++		else if(index == TILE_FOOL_RED)
++			tiles[i].index = TILE_FOOL_RED;
++		else if(index == TILE_FOOL_BLUE)
++			tiles[i].index = TILE_FOOL_BLUE;
++		else if(index == TILE_GOAL_RED)
++			tiles[i].index = TILE_GOAL_RED;
++		else if(index == TILE_GOAL_BLUE)
++			tiles[i].index = TILE_GOAL_BLUE;
++		else if(index == TILE_GOAL_LIMIT_RED)
++			tiles[i].index = TILE_GOAL_LIMIT_RED;
++		else if(index == TILE_GOAL_LIMIT_BLUE)
++			tiles[i].index = TILE_GOAL_LIMIT_BLUE;
++		else if(index == ENTITY_SPAWN_KEEPER_RED)
++			tiles[i].index = ENTITY_SPAWN_KEEPER_RED;
++		else if(index == ENTITY_SPAWN_KEEPER_BLUE)
++			tiles[i].index = ENTITY_SPAWN_KEEPER_BLUE;
++		else if(index == TILE_ICE)
++			tiles[i].index = TILE_ICE;
++		else if(index == TILE_BUMPER_SPEEDUP)
++			tiles[i].index = TILE_BUMPER_SPEEDUP;
++		else if(index == TILE_SPEEDUP)
++			tiles[i].index = TILE_SPEEDUP;
++		else if(index == TILE_SPEEDUP_UP)
++			tiles[i].index = TILE_SPEEDUP_UP;
++		else if(index == TILE_SPEEDUP_RIGHT)
++			tiles[i].index = TILE_SPEEDUP_RIGHT;
++		else if(index == TILE_SPEEDUP_DOWN)
++			tiles[i].index = TILE_SPEEDUP_DOWN;
++		else if(index == TILE_SPEEDUP_LEFT)
++			tiles[i].index = TILE_SPEEDUP_LEFT;
++		else if(index == TILE_BUMPER_SLOWDOWN)
++			tiles[i].index = TILE_BUMPER_SLOWDOWN;
++		else if(index == TILE_SLOWDOWN)
++			tiles[i].index = TILE_SLOWDOWN;
++		else if(index == TILE_BUMPER_RANDOM)
++			tiles[i].index = TILE_BUMPER_RANDOM;
++		else if(index == TILE_RANDOM)
++			tiles[i].index = TILE_RANDOM;
++		else if(index == TILE_PLAYER_COLLISION)
++			tiles[i].index = TILE_PLAYER_COLLISION;
++		else if(index == TILE_RESET_BALL)
++			tiles[i].index = TILE_RESET_BALL;
++		else if(index == TILE_ACTION_1)
++			tiles[i].index = TILE_ACTION_1;
++		else if(index == TILE_ACTION_2)
++			tiles[i].index = TILE_ACTION_2;
++		else if(index == TILE_ACTION_3)
++			tiles[i].index = TILE_ACTION_3;
++		else if(index == TILE_ACTION_4)
++			tiles[i].index = TILE_ACTION_4;
++		else if(index == TILE_ACTION_5)
++			tiles[i].index = TILE_ACTION_5;
++		else if(index == TILE_ACTION_6)
++			tiles[i].index = TILE_ACTION_6;
+ 		else
+ 			tiles[i].index = 0;
+ 	}
+@@ -50,7 +104,10 @@
+ 	
+ 	if(tiles[ny*width+nx].index > 128)
+ 		return 0;
+-	return tiles[ny*width+nx].index;
++	if(tiles[ny*width+nx].index == COLFLAG_SOLID ||tiles[ny*width+nx].index == (COLFLAG_SOLID|COLFLAG_NOHOOK) || tiles[ny*width+nx].index == COLFLAG_DEATH)
++		return tiles[ny*width+nx].index;
++	else
++		return 0;
+ }
+ 
+ int col_is_solid(int x, int y)
+@@ -58,6 +115,164 @@
+ 	return col_get(x,y)&COLFLAG_SOLID;
+ }
+ 
++int col_is_red(int x, int y)
++{
++	int nx = x/32;
++	int ny = y/32;
++	if(y<0 || nx < 0 || nx >= width || ny >= height)
++		return 0;
++	return (int)tiles[ny*width+nx].index == TILE_GOAL_RED;
++}
++int col_is_blue(int x, int y)
++{
++	int nx = x/32;
++	int ny = y/32;
++	if(y<0 || nx < 0 || nx >= width || ny >= height)
++		return 0;
++	return (int)tiles[ny*width+nx].index == (int)TILE_GOAL_BLUE;
++}
++int col_is_goal_limit(int x, int y, int team)
++{
++	int nx = x/32;
++	int ny = y/32;
++	if(y<0 || nx < 0 || nx >= width || ny >= height)
++		return 0;
++	
++	if(team == 0)
++		return tiles[ny*width+nx].index == TILE_GOAL_LIMIT_RED;
++	if(team == 1)
++		return tiles[ny*width+nx].index == TILE_GOAL_LIMIT_BLUE;
++	return 0;
++}
++int col_is_fool(int x, int y, int team)
++{
++	int nx = x/32;
++	int ny = y/32;
++	if(y<0 || nx < 0 || nx >= width || ny >= height)
++		return 0;
++	
++	if(team==0)return tiles[ny*width+nx].index == TILE_FOOL_RED;
++	else if(team==1)return tiles[ny*width+nx].index == TILE_FOOL_BLUE;
++	else return 0;
++}
++int col_is_bumper_speedup(int x, int y)
++{
++	int nx = x/32;
++	int ny = y/32;
++	if(y<0 || nx < 0 || nx >= width || ny >= height)
++		return 0;
++	return tiles[ny*width+nx].index == TILE_BUMPER_SPEEDUP;
++}
++int col_is_speedup(int x, int y)
++{
++	int nx = x/32;
++	int ny = y/32;
++	if(y<0 || nx < 0 || nx >= width || ny >= height)
++		return 0;
++	return tiles[ny*width+nx].index == TILE_SPEEDUP;
++}
++int col_is_speedup_up(int x, int y)
++{
++	int nx = x/32;
++	int ny = y/32;
++	if(y<0 || nx < 0 || nx >= width || ny >= height)
++		return 0;
++	return tiles[ny*width+nx].index == TILE_SPEEDUP_UP;
++}
++int col_is_speedup_right(int x, int y)
++{
++	int nx = x/32;
++	int ny = y/32;
++	if(y<0 || nx < 0 || nx >= width || ny >= height)
++		return 0;
++	return tiles[ny*width+nx].index == TILE_SPEEDUP_RIGHT;
++}
++int col_is_speedup_down(int x, int y)
++{
++	int nx = x/32;
++	int ny = y/32;
++	if(y<0 || nx < 0 || nx >= width || ny >= height)
++		return 0;
++	return tiles[ny*width+nx].index == TILE_SPEEDUP_DOWN;
++}
++int col_is_speedup_left(int x, int y)
++{
++	int nx = x/32;
++	int ny = y/32;
++	if(y<0 || nx < 0 || nx >= width || ny >= height)
++		return 0;
++	return tiles[ny*width+nx].index == TILE_SPEEDUP_LEFT;
++}
++int col_is_bumper_slowdown(int x, int y)
++{
++	int nx = x/32;
++	int ny = y/32;
++	if(y<0 || nx < 0 || nx >= width || ny >= height)
++		return 0;
++	return tiles[ny*width+nx].index == TILE_BUMPER_SLOWDOWN;
++}
++int col_is_slowdown(int x, int y)
++{
++	int nx = x/32;
++	int ny = y/32;
++	if(y<0 || nx < 0 || nx >= width || ny >= height)
++		return 0;
++	return tiles[ny*width+nx].index == TILE_SLOWDOWN;
++}
++int col_is_bumper_random(int x, int y)
++{
++	int nx = x/32;
++	int ny = y/32;
++	if(y<0 || nx < 0 || nx >= width || ny >= height)
++		return 0;
++	return tiles[ny*width+nx].index == TILE_BUMPER_RANDOM;
++}
++int col_is_random(int x, int y)
++{
++	int nx = x/32;
++	int ny = y/32;
++	if(y<0 || nx < 0 || nx >= width || ny >= height)
++		return 0;
++	return tiles[ny*width+nx].index == TILE_RANDOM;
++}
++int col_is_player_collision(int x, int y)
++{
++	int nx = x/32;
++	int ny = y/32;
++	if(y<0 || nx < 0 || nx >= width || ny >= height)
++		return 0;
++	return tiles[ny*width+nx].index == TILE_PLAYER_COLLISION;
++}
++int col_is_ice(int x, int y)
++{
++	int nx = x/32;
++	int ny = y/32;
++	if(y<0 || nx < 0 || nx >= width || ny >= height)
++		return 0;
++	return tiles[ny*width+nx].index == TILE_ICE;
++}
++
++int col_is_ball_reset(int x, int y)
++{
++	int nx = x/32;
++	int ny = y/32;
++	if(y<0 || nx < 0 || nx >= width || ny >= height)
++		return 0;
++	return tiles[ny*width+nx].index == TILE_RESET_BALL;
++}
++
++int col_is_action_tile(int x, int y)
++{
++	int nx = x/32;
++	int ny = y/32;
++	if(y<0 || nx < 0 || nx >= width || ny >= height)
++		return 0;
++	if(tiles[ny*width+nx].index - TILE_ACTION_1 >= 0 && tiles[ny*width+nx].index - TILE_ACTION_1 < 6)
++	{
++		return tiles[ny*width+nx].index - TILE_ACTION_1 + 1;
++	}
++	return 0;
++}
+ 
+ // TODO: rewrite this smarter!
+ int col_intersect_line(vec2 pos0, vec2 pos1, vec2 *out_collision, vec2 *out_before_collision)
+diff -Naur teeworlds-0.5.2-src/src/game/collision.hpp modpack/src/game/collision.hpp
+--- teeworlds-0.5.2-src/src/game/collision.hpp	2009-10-26 19:04:31.000000000 +0100
++++ modpack/src/game/collision.hpp	2010-05-25 20:36:35.000000000 +0200
+@@ -13,6 +13,24 @@
+ 
+ int col_init();
+ int col_is_solid(int x, int y);
++int col_is_red(int x, int y);
++int col_is_blue(int x, int y);
++int col_is_fool(int x, int y,int team);
++int col_is_goal_limit(int x, int y, int team);
++int col_is_bumper_speedup(int x, int y);
++int col_is_speedup(int x, int y);
++int col_is_speedup_up(int x, int y);
++int col_is_speedup_right(int x, int y);
++int col_is_speedup_down(int x, int y);
++int col_is_speedup_left(int x, int y);
++int col_is_bumper_slowdown(int x, int y);
++int col_is_slowdown(int x, int y);
++int col_is_bumper_random(int x, int y);
++int col_is_random(int x, int y);
++int col_is_player_collision(int x, int y);
++int col_is_ice(int x, int y);
++int col_is_ball_reset(int x, int y);
++int col_is_action_tile(int x, int y);
+ int col_get(int x, int y);
+ int col_width();
+ int col_height();
+diff -Naur teeworlds-0.5.2-src/src/game/gamecore.cpp modpack/src/game/gamecore.cpp
+--- teeworlds-0.5.2-src/src/game/gamecore.cpp	2009-10-26 19:04:31.000000000 +0100
++++ modpack/src/game/gamecore.cpp	2010-05-25 20:36:35.000000000 +0200
+@@ -1,6 +1,7 @@
+ /* copyright (c) 2007 magnus auvinen, see licence.txt for more info */
+ #include <string.h>
+ #include "gamecore.hpp"
++#include <engine/e_config.h>
+ 
+ const char *TUNING_PARAMS::names[] =
+ {
+@@ -198,6 +199,13 @@
+ 	float max_speed = grounded ? world->tuning.ground_control_speed : world->tuning.air_control_speed;
+ 	float accel = grounded ? world->tuning.ground_control_accel : world->tuning.air_control_accel;
+ 	float friction = grounded ? world->tuning.ground_friction : world->tuning.air_friction;
++	if(grounded && col_is_ice((int)pos.x, (int)pos.y))
++	{
++		max_speed = (float)config.sv_ice_max_speed/1000.0f;
++		accel = (float)config.sv_ice_accel/1000.0f;
++		friction = 1000.0f/((float)config.sv_ice_friction+1000.0f);
++	}
++	
+ 	
+ 	// handle input
+ 	if(use_input)
+diff -Naur teeworlds-0.5.2-src/src/game/gamecore.hpp modpack/src/game/gamecore.hpp
+--- teeworlds-0.5.2-src/src/game/gamecore.hpp	2009-10-26 19:04:31.000000000 +0100
++++ modpack/src/game/gamecore.hpp	2010-05-25 20:36:35.000000000 +0200
+@@ -194,7 +194,7 @@
+ #define min(a, b) ( a > b ? b : a)
+ #define max(a, b) ( a > b ? a : b)
+ 
+-inline bool col_check_point(float x, float y) { return col_is_solid(round(x), round(y)) != 0; }
++inline bool col_check_point(float x, float y) { return col_is_solid(round(x), round(y)) != 0 || col_is_player_collision(round(x), round(y)) != 0; }
+ inline bool col_check_point(vec2 p) { return col_check_point(p.x, p.y); }
+ 
+ #endif
+diff -Naur teeworlds-0.5.2-src/src/game/mapitems.hpp modpack/src/game/mapitems.hpp
+--- teeworlds-0.5.2-src/src/game/mapitems.hpp	2009-10-26 19:04:31.000000000 +0100
++++ modpack/src/game/mapitems.hpp	2010-05-25 20:36:35.000000000 +0200
+@@ -45,6 +45,88 @@
+ 	TILE_SOLID,
+ 	TILE_DEATH,
+ 	TILE_NOHOOK,
++
++	TILE_NO_USE_1,
++	TILE_NO_USE_2,
++	TILE_NO_USE_3,
++	TILE_NO_USE_4,
++	TILE_NO_USE_5,
++	TILE_NO_USE_6,
++	TILE_NO_USE_7,
++	TILE_NO_USE_8,
++	TILE_NO_USE_9,
++	TILE_NO_USE_a,
++	TILE_NO_USE_b,
++	TILE_NO_USE_c,
++	
++	TILE_NO_USE_10,
++	TILE_NO_USE_11,
++	TILE_NO_USE_12,
++	TILE_NO_USE_13,
++	TILE_NO_USE_14,
++	TILE_NO_USE_15,
++	TILE_NO_USE_16,
++	TILE_NO_USE_17,
++	TILE_NO_USE_18,
++	TILE_NO_USE_19,
++	TILE_NO_USE_1a,
++	TILE_NO_USE_1b,
++	TILE_NO_USE_1c,
++	TILE_NO_USE_1d,
++	TILE_NO_USE_1e,
++	TILE_NO_USE_1f,
++	
++	TILE_NO_USE_20,
++	TILE_NO_USE_21,
++	TILE_NO_USE_22,
++	TILE_NO_USE_23,
++	TILE_NO_USE_24,
++	TILE_NO_USE_25,
++	TILE_NO_USE_26,
++	TILE_NO_USE_27,
++	TILE_NO_USE_28,
++	TILE_NO_USE_29,
++	TILE_NO_USE_2a,
++	TILE_NO_USE_2b,
++	TILE_NO_USE_2c,
++	TILE_NO_USE_2d,
++	TILE_NO_USE_2e,
++	TILE_NO_USE_2f,
++	
++	TILE_NO_USE_31,
++	TILE_NO_USE_32,
++	TILE_NO_USE_33,
++	TILE_NO_USE_34,
++	TILE_NO_USE_35,
++	
++	TILE_FOOL_RED,
++	TILE_FOOL_BLUE,
++	TILE_GOAL_RED,
++	TILE_GOAL_BLUE,
++	TILE_GOAL_LIMIT_RED,
++	TILE_GOAL_LIMIT_BLUE,
++	ENTITY_SPAWN_KEEPER_RED,
++	ENTITY_SPAWN_KEEPER_BLUE,
++	TILE_BUMPER_SPEEDUP,
++	TILE_SPEEDUP,
++	TILE_SPEEDUP_UP,
++	TILE_SPEEDUP_RIGHT,
++	TILE_SPEEDUP_DOWN,
++	TILE_SPEEDUP_LEFT,
++	TILE_BUMPER_SLOWDOWN,
++	TILE_SLOWDOWN,
++	TILE_BUMPER_RANDOM,
++	TILE_RANDOM,
++	TILE_PLAYER_COLLISION,
++	TILE_RESET_BALL,
++	TILE_ACTION_1,
++	TILE_ACTION_2,
++	TILE_ACTION_3,
++	TILE_ACTION_4,
++	TILE_ACTION_5,
++	TILE_ACTION_6,
++	
++	TILE_ICE,
+ 	
+ 	TILEFLAG_VFLIP=1,
+ 	TILEFLAG_HFLIP=2,
+diff -Naur teeworlds-0.5.2-src/src/game/server/entities/character.cpp modpack/src/game/server/entities/character.cpp
+--- teeworlds-0.5.2-src/src/game/server/entities/character.cpp	2009-10-26 19:04:31.000000000 +0100
++++ modpack/src/game/server/entities/character.cpp	2010-05-25 20:36:35.000000000 +0200
+@@ -1,9 +1,9 @@
++#include <base/math.hpp>
+ #include <new>
+ #include <engine/e_server_interface.h>
+ #include <engine/e_config.h>
+ #include <game/server/gamecontext.hpp>
+ #include <game/mapitems.hpp>
+-
+ #include "character.hpp"
+ #include "laser.hpp"
+ #include "projectile.hpp"
+@@ -75,7 +75,7 @@
+ 	player->force_balanced = false;
+ 
+ 	game.controller->on_character_spawn(this);
+-
++	
+ 	return true;
+ }
+ 
+@@ -116,7 +116,7 @@
+ 	
+ 	vec2 direction = normalize(vec2(latest_input.target_x, latest_input.target_y));
+ 
+-	if ((server_tick() - ninja.activationtick) > (data->weapons.ninja.duration * server_tickspeed() / 1000))
++	if ((!game.controller->mod || !config.sv_ninja_mod) && (server_tick() - ninja.activationtick) > (data->weapons.ninja.duration * server_tickspeed() / 1000))
+ 	{
+ 		// time's up, return
+ 		weapons[WEAPON_NINJA].got = false;
+@@ -197,7 +197,7 @@
+ 
+ void CHARACTER::do_weaponswitch()
+ {
+-	if(reload_timer != 0) // make sure we have reloaded
++	if(reload_timer != 0 || config.sv_ball_mod) // make sure we have reloaded
+ 		return;
+ 		
+ 	if(queued_weapon == -1) // check for a queued weapon
+@@ -253,7 +253,7 @@
+ 
+ void CHARACTER::fire_weapon()
+ {
+-	if(reload_timer != 0)
++	if(reload_timer != 0 && !(fire_ball_tick && server_tick() >= fire_ball_tick))
+ 		return;
+ 		
+ 	do_weaponswitch();
+@@ -269,6 +269,7 @@
+ 	bool will_fire = false;
+ 	if(count_input(latest_previnput.fire, latest_input.fire).presses) will_fire = true;
+ 	if(fullauto && (latest_input.fire&1) && weapons[active_weapon].ammo) will_fire = true;
++	if(fire_ball_tick && server_tick() >= fire_ball_tick) will_fire = true;
+ 	if(!will_fire)
+ 		return;
+ 		
+@@ -293,33 +294,176 @@
+ 			
+ 			CHARACTER *ents[64];
+ 			int hits = 0;
+-			int num = game.world.find_entities(pos+direction*phys_size*0.75f, phys_size*0.5f, (ENTITY**)ents, 64, NETOBJTYPE_CHARACTER);
+-
++			int num;
++			if(config.sv_ball_mod)
++				num = game.world.find_entities(pos+direction*phys_size*0.9f, phys_size*0.5f, (ENTITY**)ents, 64, NETOBJTYPE_CHARACTER);
++			else
++				num = game.world.find_entities(pos+direction*phys_size*0.75f, phys_size*0.5f, (ENTITY**)ents, 64, NETOBJTYPE_CHARACTER);
++			if(partly_dead)
++				break;
+ 			for (int i = 0; i < num; i++)
+ 			{
+ 				CHARACTER *target = ents[i];
+-				if (target == this)
++				if (target == this || target->player->team < 0)
+ 					continue;
+-					
+-				// hit a player, give him damage and stuffs...
+-				vec2 fdir = normalize(ents[i]->pos - pos);
++				if(!config.sv_ball_mod)
++				{
++					// hit a player, give him damage and stuffs...
++					vec2 fdir = normalize(ents[i]->pos - pos);
+ 
+-				// set his velocity to fast upward (for now)
+-				game.create_hammerhit(pos);
+-				ents[i]->take_damage(vec2(0,-1.0f), data->weapons.hammer.base->damage, player->client_id, active_weapon);
+-				vec2 dir;
+-				if (length(target->pos - pos) > 0.0f)
+-					dir = normalize(target->pos - pos);
+-				else
+-					dir = vec2(0,-1);
++					// set his velocity to fast upward (for now)
++					game.create_hammerhit(pos);
++					ents[i]->take_damage(vec2(0,-1.0f), data->weapons.hammer.base->damage, player->client_id, active_weapon);
++					vec2 dir;
++					if (length(target->pos - pos) > 0.0f)
++						dir = normalize(target->pos - pos);
++					else
++						dir = vec2(0,-1);
+ 					
+-				target->core.vel += normalize(dir + vec2(0,-1.1f)) * 10.0f;
++					target->core.vel += normalize(dir + vec2(0,-1.1f)) * 10.0f;
++				}
++				else
++				{
++					vec2 dir;
++					if (length(target->pos - pos) > 0.0f)
++						dir = normalize(target->pos - pos);
++					else
++						dir = vec2(0,-1);
++					target->core.vel += normalize(dir + vec2(0,-1.1f)) * 10.0f;
++					game.create_hammerhit(pos);
++					if(ents[i]->weapons[WEAPON_GRENADE].ammo > 0)
++					{
++						// matthis
++						// get ball by hitting an enemy
++						player->get_ball_time = server_tick();
++
++						game.controller->passer = -1;
++						weapons[WEAPON_GRENADE].got = true;
++						if(weapons[WEAPON_GRENADE].ammo < 10)
++							weapons[WEAPON_GRENADE].ammo++;
++						active_weapon = WEAPON_GRENADE;
++						last_weapon = WEAPON_GRENADE;
++						if(--ents[i]->weapons[WEAPON_GRENADE].ammo == 0)
++						{
++							ents[i]->weapons[WEAPON_GRENADE].got = false;
++							ents[i]->active_weapon = config.sv_second_weapon;
++							ents[i]->last_weapon = config.sv_second_weapon;
++							ents[i]->fire_ball_tick = 0;
++						}
++						if(player->goalkeeper)
++							fire_ball_tick = server_tick() + server_tickspeed()*config.sv_goal_keeptime;
++						else
++							fire_ball_tick = server_tick() + server_tickspeed()*config.sv_player_keeptime;
++					}
++					if(config.sv_hammer_team_att_loss && ents[i]->team == team)
++					{
++						if(health-config.sv_hammer_team_att_loss < 2)
++						{
++							health = 1;
++							partly_dead = server_tick() + server_tickspeed() * config.sv_partly_dead;
++						}
++						else
++						{
++							health -= config.sv_hammer_team_att_loss;
++						}
++					}
++					else if(config.sv_hammer_att_loss)
++					{
++						if(health-config.sv_hammer_att_loss < 2)
++						{
++							health = 1;
++							partly_dead = server_tick() + server_tickspeed() * config.sv_partly_dead;
++						}
++						else
++						{
++							health -= config.sv_hammer_att_loss;
++						}
++					}
++					if(config.sv_hammer_def_loss)
++					{
++						if(ents[i]->armor-config.sv_hammer_def_loss < 1)
++						{
++							ents[i]->armor = 0;
++							while(ents[i]->fire_ball_tick)
++							{
++								ents[i]->fire_ball_tick = 1;
++								ents[i]->fire_weapon();
++							}
++						}
++						else
++						{
++							ents[i]->armor -= config.sv_hammer_def_loss;
++						}
++					}
++					reload_timer = data->weapons.id[active_weapon].firedelay * server_tickspeed() / 1000;
++				}
+ 				hits++;
+ 			}
++			if(config.sv_big_hammer && hits == 0)
++			{
++				int num = game.world.find_entities(pos+direction*phys_size*2.5f, phys_size*1.5f, (ENTITY**)ents, 64, NETOBJTYPE_CHARACTER);
++				for (int i = 0; i < num; i++)
++				{
++					CHARACTER *target = ents[i];
++					if (target == this || target->player->team < 0)
++						continue;
++					game.create_hammerhit(ents[i]->pos);
++					if(config.sv_big_hammer_team_att_loss && ents[i]->team == team)
++					{
++						if(health-config.sv_big_hammer_team_att_loss < 2)
++						{
++							health = 1;
++							partly_dead = server_tick() + server_tickspeed() * config.sv_partly_dead;
++						}
++						else
++						{
++							health -= config.sv_big_hammer_team_att_loss;
++						}
++					}
++					if(config.sv_big_hammer_att_loss)
++					{
++						if(health-config.sv_big_hammer_att_loss < 2)
++						{
++							health = 1;
++							partly_dead = server_tick() + server_tickspeed() * config.sv_partly_dead;
++						}
++						else
++						{
++							health -= config.sv_big_hammer_att_loss;
++						}
++					}
++					if(config.sv_big_hammer_def_loss)
++					{
++						if(ents[i]->armor-config.sv_big_hammer_def_loss < 1)
++						{
++							ents[i]->armor = 0;
++							while(ents[i]->fire_ball_tick)
++							{
++								ents[i]->fire_ball_tick = 1;
++								ents[i]->fire_weapon();
++							}
++						}
++						else
++						{
++							ents[i]->armor -= config.sv_big_hammer_def_loss;
++						}
++					}
++					vec2 dir;
++					if (length(ents[i]->pos - pos) > 0.0f)
++						dir = normalize(ents[i]->pos - pos);
++					else
++						dir = vec2(0,-1);
++					
++					ents[i]->core.vel += normalize(dir + vec2(0,-1.1f)) * 4.0f;
++				}
++			}
+ 			
+ 			// if we hit anything, we have to wait for the reload
+ 			if(hits)
++			{
+ 				reload_timer = server_tickspeed()/3;
++				return;
++			}
+ 			
+ 		} break;
+ 
+@@ -383,6 +527,8 @@
+ 
+ 		case WEAPON_GRENADE:
+ 		{
++			direction.x += core.vel.x*((float)config.sv_grenade_startspeed/10000.0f);
++			direction.y += core.vel.y*((float)config.sv_grenade_startspeed/10000.0f);
+ 			PROJECTILE *proj = new PROJECTILE(WEAPON_GRENADE,
+ 				player->client_id,
+ 				projectile_startpos,
+@@ -402,6 +548,10 @@
+ 			server_send_msg(player->client_id);
+ 
+ 			game.create_sound(pos, SOUND_GRENADE_FIRE);
++			
++			// matthis ( store the shot time )
++			player->last_shot_time = server_tick();
++
+ 		} break;
+ 		
+ 		case WEAPON_RIFLE:
+@@ -429,6 +579,14 @@
+ 
+ 	if(weapons[active_weapon].ammo > 0) // -1 == unlimited
+ 		weapons[active_weapon].ammo--;
++	if(config.sv_ball_mod && weapons[active_weapon].ammo == 0)
++	{
++		active_weapon = config.sv_second_weapon;
++		last_weapon = config.sv_second_weapon;
++		weapons[WEAPON_GRENADE].got = false;
++		queued_weapon = -1;
++		fire_ball_tick = 0;
++	}
+ 	attack_tick = server_tick();
+ 	if(!reload_timer)
+ 		reload_timer = data->weapons.id[active_weapon].firedelay * server_tickspeed() / 1000;
+@@ -459,7 +617,7 @@
+ 	if(reload_timer)
+ 	{
+ 		reload_timer--;
+-		return 0;
++		goto here;
+ 	}
+ 	
+ 	/*
+@@ -471,13 +629,13 @@
+ 
+ 	// fire weapon, if wanted
+ 	fire_weapon();
+-
++here:
+ 	// ammo regen
+ 	int ammoregentime = data->weapons.id[active_weapon].ammoregentime;
+ 	if(ammoregentime)
+ 	{
+ 		// If equipped and not active, regen ammo?
+-		if (reload_timer <= 0)
++		if (reload_timer <= 0 || config.sv_immediate_ammo_regen)
+ 		{
+ 			if (weapons[active_weapon].ammoregenstart < 0)
+ 				weapons[active_weapon].ammoregenstart = server_tick();
+@@ -502,7 +660,11 @@
+ {
+ 	// check for changes
+ 	if(mem_comp(&input, new_input, sizeof(NETOBJ_PLAYER_INPUT)) != 0)
++	{
++		if(last_action != -1)
++			player->last_input = server_tick();
+ 		last_action = server_tick();
++	}
+ 		
+ 	// copy new input
+ 	mem_copy(&input, new_input, sizeof(input));
+@@ -544,6 +706,273 @@
+ 	core.input = input;
+ 	core.tick(true);
+ 	
++	if(game.controller->mod && player->team >= 0)
++	{
++		if(player->goalkeeper && (col_is_goal_limit((int)pos.x + phys_size/2, (int)pos.y + phys_size/2, player->team) || 
++			col_is_goal_limit((int)pos.x + phys_size/2, (int)pos.y - phys_size/2, player->team) || 
++			col_is_goal_limit((int)pos.x - phys_size/2, (int)pos.y + phys_size/2, player->team) || 
++			col_is_goal_limit((int)pos.x - phys_size/2, (int)pos.y - phys_size/2, player->team)))
++		{
++			if(fire_ball_tick)
++			{
++				fire_ball_tick = 1;
++				fire_weapon();
++			}
++			player->kill_character(-1);
++			return;
++		}
++		if(col_is_fool((int)pos.x + phys_size/2, (int)pos.y + phys_size/2, player->team) || 
++			col_is_fool((int)pos.x + phys_size/2, (int)pos.y - phys_size/2, player->team) || 
++			col_is_fool((int)pos.x - phys_size/2, (int)pos.y + phys_size/2, player->team) || 
++			col_is_fool((int)pos.x - phys_size/2, (int)pos.y - phys_size/2, player->team))
++		{
++			if(fire_ball_tick)
++			{
++				fire_ball_tick = 1;
++				fire_weapon();
++			}
++			player->kill_character(-1);
++			return;
++		}
++		
++		int action_tile = col_is_action_tile(pos.x, pos.y);
++		if(action_tile)
++		{
++			switch(action_tile)
++			{
++				case 1:
++					if(config.sv_action_1_cause == 1 || (config.sv_action_1_cause > 1 && player->team == config.sv_action_1_cause - 2))
++					{
++						game.controller->action_parser(config.sv_action_1_tile, config.sv_action_1_type, config.sv_action_1_cmd);
++					}
++					break;
++				case 2:
++					if(config.sv_action_2_cause == 0 || (config.sv_action_2_cause > 1 && player->team == config.sv_action_2_cause - 2))
++					{
++						game.controller->action_parser(config.sv_action_2_tile, config.sv_action_2_type, config.sv_action_1_cmd);
++					}
++					break;
++				case 3:
++					if(config.sv_action_3_cause == 0 || (config.sv_action_3_cause > 1 && player->team == config.sv_action_3_cause - 2))
++					{
++						game.controller->action_parser(config.sv_action_3_tile, config.sv_action_3_type, config.sv_action_1_cmd);
++					}
++					break;
++				case 4:
++					if(config.sv_action_4_cause == 0 || (config.sv_action_4_cause > 1 && player->team == config.sv_action_4_cause - 2))
++					{
++						game.controller->action_parser(config.sv_action_4_tile, config.sv_action_4_type, config.sv_action_1_cmd);
++					}
++					break;
++				case 5:
++					if(config.sv_action_5_cause == 0 || (config.sv_action_5_cause > 1 && player->team == config.sv_action_5_cause - 2))
++					{
++						game.controller->action_parser(config.sv_action_5_tile, config.sv_action_5_type, config.sv_action_1_cmd);
++					}
++					break;
++				case 6:
++					if(config.sv_action_6_cause == 0 || (config.sv_action_6_cause > 1 && player->team == config.sv_action_6_cause - 2))
++					{
++						game.controller->action_parser(config.sv_action_6_tile, config.sv_action_6_type, config.sv_action_1_cmd);
++					}
++					break;
++			}
++		}
++		
++		if(config.sv_goalkeeper && config.sv_goalkeeper_jumping && player->goalkeeper && server_tick()%15 == 0)
++		{
++			core.jumped = 0;
++		}
++		if(config.sv_goalkeeper && !config.sv_hook_goalkeeper && core.hooked_player != -1 && game.players[core.hooked_player]->goalkeeper)
++		{
++			core.hook_state = HOOK_RETRACT_START;
++			core.hooked_player = -1;
++		}
++	
++		if(!config.sv_hook_teammates && core.hooked_player != -1 && game.players[core.hooked_player]->team == team)
++		{
++			core.hook_state = HOOK_RETRACT_START;
++			core.hooked_player = -1;
++		}
++		bool decreasing = false;
++		if(partly_dead)
++		{
++			if(partly_dead < server_tick())
++				partly_dead = 0;
++			if(core.hooked_player >= 0)
++			{
++				core.hook_state = HOOK_RETRACT_START;
++				core.hooked_player = -1;
++			}
++			decreasing = true;
++		}
++		if(weapons[WEAPON_GRENADE].ammo > 0)
++		{
++			game.controller->ball = core.pos;
++			if(config.sv_ball_att_decr || config.sv_ball_def_decr)
++			{
++				decreasing = true;
++				if(player->goalkeeper)
++				{
++					if((fire_ball_tick-(server_tick()-server_tickspeed()*config.sv_goal_keeptime))%(int)(((float)10/(float)config.sv_ball_att_decr)*server_tickspeed()) == 0)
++					{
++						if(--health <= 1 && config.sv_partly_dead)
++						{
++							core.hook_state = HOOK_RETRACT_START;
++							core.hooked_player = -1;
++							if(fire_ball_tick)
++								fire_ball_tick = server_tick();
++							partly_dead = server_tick() + server_tickspeed() * config.sv_partly_dead;
++							health = 1;
++							armor = 0;
++						}
++					}
++					if(armor && (fire_ball_tick-(server_tick()-server_tickspeed()*config.sv_goal_keeptime))%(int)(((float)10/(float)config.sv_ball_def_decr)*server_tickspeed()) == 0)
++					{
++						if(--armor == 0 && config.sv_partly_dead)
++						{
++							armor = 0;
++							if(fire_ball_tick)
++								fire_ball_tick = server_tick();
++						}
++					}
++				}
++				else
++				{
++					if((fire_ball_tick-(server_tick()-server_tickspeed()*config.sv_player_keeptime))%(int)(((float)10/(float)config.sv_ball_att_decr)*server_tickspeed()) == 0)
++					{
++						if(--health <= 1 && config.sv_partly_dead)
++						{
++							core.hook_state = HOOK_RETRACT_START;
++							core.hooked_player = -1;
++							if(fire_ball_tick)
++								fire_ball_tick = server_tick();
++							partly_dead = server_tick() + server_tickspeed() * config.sv_partly_dead;
++							health = 1;
++							armor = 0;
++						}
++					}
++					if(armor && (fire_ball_tick-(server_tick()-server_tickspeed()*config.sv_player_keeptime))%(int)(((float)10/(float)config.sv_ball_def_decr)*server_tickspeed()) == 0)
++					{
++						if(--armor == 0)
++						{
++							armor = 0;
++							if(fire_ball_tick)
++								fire_ball_tick = server_tick();
++						}
++					}
++				}
++			}
++		}
++		if(core.hooked_player >= 0)
++		{
++			if(config.sv_hook_team_att_decr || config.sv_hook_att_decr)
++				decreasing = true;
++			if(config.sv_hook_team_att_decr && game.players[core.hooked_player]->team == team && core.hook_tick%(int)(((float)10/(float)config.sv_hook_team_att_decr)*server_tickspeed()) == 0)
++			{
++				if(--health <= 1 && config.sv_partly_dead)
++				{
++					core.hook_state = HOOK_RETRACT_START;
++					core.hooked_player = -1;
++					if(fire_ball_tick)
++						fire_ball_tick = server_tick();
++					partly_dead = server_tick() + server_tickspeed() * config.sv_partly_dead;
++					health = 1;
++					armor = 0;
++ 				}
++			}
++			else if(config.sv_hook_att_decr && core.hook_tick%(int)(((float)10/(float)config.sv_hook_att_decr)*server_tickspeed()) == 0)
++			{
++				if(--health <= 1 && config.sv_partly_dead)
++				{
++					core.hook_state = HOOK_RETRACT_START;
++					core.hooked_player = -1;
++					if(fire_ball_tick)
++						fire_ball_tick = server_tick();
++					partly_dead = server_tick() + server_tickspeed() * config.sv_partly_dead;
++					health = 1;
++					armor = 0;
++				}
++			}
++		}
++		if(config.sv_hook_def_decr || config.sv_hook_def_health_decr)
++		{
++			for(int i = 0; i < MAX_CLIENTS; i++)
++			{
++				if(!game.players[i])
++					continue;
++				CHARACTER *p = game.players[i]->get_character();
++				if(p && p->core.hooked_player == player->client_id)
++					decreasing = true;
++				if(config.sv_hook_def_decr && p && p->core.hooked_player == player->client_id && p->core.hook_tick%(int)(((float)10/(float)config.sv_hook_def_decr)*server_tickspeed()) == 0)
++				{
++					if(--armor == 0)
++					{
++						armor = 0;
++						if(fire_ball_tick)
++							fire_ball_tick = server_tick();
++						break;
++					}
++				}
++				if(config.sv_hook_def_health_decr && p && p->core.hooked_player == player->client_id && p->core.hook_tick%(int)(((float)10/(float)config.sv_hook_def_health_decr)*server_tickspeed()) == 0)
++				{
++					if(--health == 0)
++					{
++						if(config.sv_partly_dead)
++						{
++							core.hook_state = HOOK_RETRACT_START;
++							core.hooked_player = -1;
++							if(fire_ball_tick)
++								fire_ball_tick = server_tick();
++							partly_dead = server_tick() + server_tickspeed() * config.sv_partly_dead;
++							health = 1;
++							armor = 0;
++							break;
++						}
++						else
++						{
++							p->player->score++;
++							player->score++;
++							armor = 0;
++							if(fire_ball_tick)
++								fire_ball_tick = server_tick();
++							break;
++						}
++					}
++				}
++			}
++		}
++		if(config.sv_health_regen && !decreasing)
++		{
++			if(health < 10)
++			{
++				if(++health_regen % (int)(((float)10/(float)config.sv_health_regen)*server_tickspeed()) == 0)
++					health++;
++			}
++			else
++			{
++				health_regen = 0;
++			}
++		}
++		if(config.sv_armor_regen && !decreasing)
++		{
++			if(armor < 10)
++			{
++				if(++armor_regen % (int)(((float)10/(float)config.sv_armor_regen)*server_tickspeed()) == 0)
++					armor++;
++			}
++			else
++			{
++				armor_regen = 0;
++			}
++		}
++		if(health <= 0)
++		{
++			die(player->client_id, WEAPON_WORLD);
++			return;
++		}
++	}
++
+ 	float phys_size = 28.0f;
+ 	// handle death-tiles
+ 	if(col_get((int)(pos.x+phys_size/2), (int)(pos.y-phys_size/2))&COLFLAG_DEATH ||
+@@ -551,6 +980,11 @@
+ 			col_get((int)(pos.x-phys_size/2), (int)(pos.y-phys_size/2))&COLFLAG_DEATH ||
+ 			col_get((int)(pos.x-phys_size/2), (int)(pos.y+phys_size/2))&COLFLAG_DEATH)
+ 	{
++		if(fire_ball_tick)
++		{
++			fire_ball_tick = 1;
++			fire_weapon();
++		}
+ 		die(player->client_id, WEAPON_WORLD);
+ 	}
+ 
+@@ -655,6 +1089,11 @@
+ 
+ void CHARACTER::die(int killer, int weapon)
+ {
++	while(fire_ball_tick)
++	{
++		fire_ball_tick = 1;
++		fire_weapon();
++	}
+ 	/*if (dead || team == -1)
+ 		return;*/
+ 	int mode_special = game.controller->on_character_death(this, game.players[killer], weapon);
+@@ -691,7 +1130,7 @@
+ 	game.create_death(pos, player->client_id);
+ 	
+ 	// we got to wait 0.5 secs before respawning
+-	player->respawn_tick = server_tick()+server_tickspeed()/2;
++	//player->respawn_tick = server_tick()+server_tickspeed()/2;
+ }
+ 
+ bool CHARACTER::take_damage(vec2 force, int dmg, int from, int weapon)
+diff -Naur teeworlds-0.5.2-src/src/game/server/entities/character.hpp modpack/src/game/server/entities/character.hpp
+--- teeworlds-0.5.2-src/src/game/server/entities/character.hpp	2009-10-26 19:04:31.000000000 +0100
++++ modpack/src/game/server/entities/character.hpp	2010-05-25 20:36:35.000000000 +0200
+@@ -43,6 +43,11 @@
+ 	int reload_timer;
+ 	int attack_tick;
+ 	
++	int fire_ball_tick;
++	int partly_dead;
++	int health_regen;
++	int armor_regen;
++	
+ 	int damage_taken;
+ 
+ 	int emote_type;
+diff -Naur teeworlds-0.5.2-src/src/game/server/entities/pickup.cpp modpack/src/game/server/entities/pickup.cpp
+--- teeworlds-0.5.2-src/src/game/server/entities/pickup.cpp	2009-10-26 19:04:31.000000000 +0100
++++ modpack/src/game/server/entities/pickup.cpp	2010-05-26 18:44:52.925982952 +0200
+@@ -1,4 +1,5 @@
+ #include <engine/e_server_interface.h>
++#include <engine/e_config.h>
+ #include <game/generated/g_protocol.hpp>
+ #include <game/server/gamecontext.hpp>
+ #include "pickup.hpp"
+@@ -21,6 +22,14 @@
+ 
+ void PICKUP::reset()
+ {
++	if(!config.sv_respawn_powerups)
++		return;
++	if(config.sv_ball_mod)
++	{
++		game.controller->spawning = server_tick() + config.sv_ball_respawn*server_tickspeed();
++		spawntick = 1;
++		return;
++	}
+ 	if (data->pickups[type].spawndelay > 0)
+ 		spawntick = server_tick() + server_tickspeed() * data->pickups[type].spawndelay;
+ 	else
+@@ -29,8 +38,24 @@
+ 
+ void PICKUP::tick()
+ {
+-	// wait for respawn
+-	if(spawntick > 0)
++	if(!config.sv_respawn_powerups)
++		return;
++	if(config.sv_ball_mod && type == POWERUP_WEAPON)
++	{
++		if(game.controller->spawning && spawntick != -1 && game.controller->spawning <= server_tick())
++		{
++			game.send_chat(-1,-2,"Ball respawned");
++			game.controller->ball = pos;
++			// respawn
++			spawntick = -1;
++			if(type == POWERUP_WEAPON)
++				game.create_sound(pos, SOUND_WEAPON_SPAWN);
++			return;
++		}
++		else if(!(game.controller->spawning && spawntick == -1) || game.controller->spawning > server_tick())
++			return;
++	}
++	else if(spawntick > 0)
+ 	{
+ 		if(server_tick() > spawntick)
+ 		{
+@@ -70,11 +95,37 @@
+ 		case POWERUP_WEAPON:
+ 			if(subtype >= 0 && subtype < NUM_WEAPONS)
+ 			{
+-				if(chr->weapons[subtype].ammo < data->weapons.id[subtype].maxammo || !chr->weapons[subtype].got)
++				if((chr->weapons[subtype].ammo < data->weapons.id[subtype].maxammo || !chr->weapons[subtype].got) && (!config.sv_ball_mod || chr->armor != 0 || config.sv_pickup_with_no_armor))
+ 				{
+ 					chr->weapons[subtype].got = true;
+-					chr->weapons[subtype].ammo = min(data->weapons.id[subtype].maxammo, chr->weapons[subtype].ammo + 10);
+-					respawntime = data->pickups[type].respawntime;
++					if(config.sv_ball_mod)
++					{
++						// matthis
++						// take the grenade launcher
++						chr->player->get_ball_time = server_tick();
++
++						chr->weapons[subtype].ammo = min(data->weapons.id[subtype].maxammo, chr->weapons[subtype].ammo + 1);
++						chr->active_weapon = subtype;
++						chr->last_weapon = subtype;
++						chr->queued_weapon = -1;
++						if(game.controller->goalkeeper[chr->player->team] == chr->player->client_id)
++							chr->fire_ball_tick = server_tick() + server_tickspeed()*config.sv_goal_keeptime;
++						else
++							chr->fire_ball_tick = server_tick() + server_tickspeed()*config.sv_player_keeptime;
++						respawntime = 0;
++						game.controller->spawning = 0;
++						spawntick = 0;
++						game.controller->passer = -1;
++						if(game.controller->projectile_pickup == 0)
++						{
++							game.controller->projectile_pickup = server_tick();
++						}
++					}
++					else
++					{
++						chr->weapons[subtype].ammo = min(data->weapons.id[subtype].maxammo, chr->weapons[subtype].ammo + 10);
++						respawntime = data->pickups[type].respawntime;
++					}
+ 
+ 					// TODO: data compiler should take care of stuff like this
+ 					if(subtype == WEAPON_GRENADE)
+@@ -122,7 +173,7 @@
+ 			break;
+ 		};
+ 
+-		if(respawntime >= 0)
++		if(respawntime >= 0 && (!config.sv_ball_mod || type != POWERUP_WEAPON))
+ 		{
+ 			dbg_msg("game", "pickup player='%d:%s' item=%d/%d",
+ 				chr->player->client_id, server_clientname(chr->player->client_id), type, subtype);
+diff -Naur teeworlds-0.5.2-src/src/game/server/entities/projectile.cpp modpack/src/game/server/entities/projectile.cpp
+--- teeworlds-0.5.2-src/src/game/server/entities/projectile.cpp	2009-10-26 19:04:31.000000000 +0100
++++ modpack/src/game/server/entities/projectile.cpp	2010-05-25 20:36:35.000000000 +0200
+@@ -1,4 +1,5 @@
+ #include <engine/e_server_interface.h>
++#include <engine/e_config.h>
+ #include <game/generated/g_protocol.hpp>
+ #include <game/server/gamecontext.hpp>
+ #include "projectile.hpp"
+@@ -23,6 +24,11 @@
+ 	this->weapon = weapon;
+ 	this->bounce = 0;
+ 	this->start_tick = server_tick();
++	if((dir.x < 0?-dir.x:dir.x) > (dir.y < 0?-dir.y:dir.y))
++		this->pick_up_again = abs(dir.x * (float)server_tickspeed() / tuning.grenade_speed * 70.0);
++	else
++		this->pick_up_again = abs(dir.y * (float)server_tickspeed() / tuning.grenade_speed * 70.0);
++	this->randomized = false;
+ 	game.world.insert_entity(this);
+ }
+ 
+@@ -55,31 +61,645 @@
+ }
+ 
+ 
++#define VERTEX_DOWN_RIGHT(OFFSET_X,OFFSET_Y) \
++float nx = ((int)(((int)col_pos.x+(OFFSET_X))/32))*32 - free_pos.x + config.sv_vertex_radius;\
++float ny = ((int)(((int)col_pos.y+(OFFSET_Y))/32))*32 - free_pos.y + config.sv_vertex_radius;\
++float nnorm = sqrt(nx*nx + ny*ny);\
++if(ny < 0)\
++{\
++	direction.y = velocity.y;\
++	direction.x = -velocity.x;\
++}\
++else if(nx < 0)\
++{\
++	direction.x = velocity.x;\
++	direction.y = -velocity.y;\
++}\
++else\
++{\
++	nx = nx / nnorm;\
++	ny = ny / nnorm;\
++	float vel = (velocity.x * nx + velocity.y *ny);\
++	nx = vel*nx;\
++	ny = vel*ny;\
++	direction.x = velocity.x - 2*nx;\
++	direction.y = velocity.y - 2*ny;\
++}\
++curpos.x -= 1;\
++curpos.y -= 1;
++
++#define VERTEX_UP_RIGHT(OFFSET_X,OFFSET_Y) \
++float nx = ((int)(((int)col_pos.x+(OFFSET_X))/32))*32 - free_pos.x + config.sv_vertex_radius;\
++float ny = ((int)(((int)col_pos.y+(OFFSET_Y))/32))*32 - free_pos.y+31 - config.sv_vertex_radius;\
++float nnorm = sqrt(nx*nx + ny*ny);\
++if(ny > 0)\
++{\
++	direction.y = velocity.y;\
++	direction.x = -velocity.x;\
++}\
++else if(nx < 0)\
++{\
++	direction.x = velocity.x;\
++	direction.y = -velocity.y;\
++}\
++else\
++{\
++	nx = nx / nnorm;\
++	ny = ny / nnorm;\
++	float vel = (velocity.x * nx + velocity.y *ny);\
++	nx = vel*nx;\
++	ny = vel*ny;\
++	direction.x = velocity.x - 2*nx;\
++	direction.y = velocity.y - 2*ny;\
++}\
++curpos.x -= 1;\
++curpos.y += 1;
++
++#define VERTEX_DOWN_LEFT(OFFSET_X,OFFSET_Y) \
++float nx = ((int)(((int)col_pos.x+(OFFSET_X))/32))*32 - free_pos.x+31 - config.sv_vertex_radius;\
++float ny = ((int)(((int)col_pos.y+(OFFSET_Y))/32))*32 - free_pos.y + config.sv_vertex_radius;\
++float nnorm = sqrt(nx*nx + ny*ny);\
++if(ny < 0)\
++{\
++	direction.y = velocity.y;\
++	direction.x = -velocity.x;\
++}\
++else if(nx > 0)\
++{\
++	direction.x = velocity.x;\
++	direction.y = -velocity.y;\
++}\
++else\
++{\
++	nx = nx / nnorm;\
++	ny = ny / nnorm;\
++	float vel = (velocity.x * nx + velocity.y *ny);\
++	nx = vel*nx;\
++	ny = vel*ny;\
++	direction.x = velocity.x - 2*nx;\
++	direction.y = velocity.y - 2*ny;\
++}\
++curpos.x += 1;\
++curpos.y -= 1;
++
++#define VERTEX_UP_LEFT(OFFSET_X,OFFSET_Y) \
++float nx = ((int)(((int)col_pos.x+(OFFSET_X))/32))*32 - free_pos.x+31 - config.sv_vertex_radius;\
++float ny = ((int)(((int)col_pos.y+(OFFSET_Y))/32))*32 - free_pos.y+31 - config.sv_vertex_radius;\
++float nnorm = sqrt(nx*nx + ny*ny);\
++if(ny > 0)\
++{\
++	direction.y = velocity.y;\
++	direction.x = -velocity.x;\
++}\
++else if(nx > 0)\
++{\
++	direction.x = velocity.x;\
++	direction.y = -velocity.y;\
++}\
++else\
++{\
++	nx = nx / nnorm;\
++	ny = ny / nnorm;\
++	float vel = (velocity.x * nx + velocity.y *ny);\
++	nx = vel*nx;\
++	ny = vel*ny;\
++	direction.x = velocity.x - 2*nx;\
++	direction.y = velocity.y - 2*ny;\
++}\
++curpos.x += 1;\
++curpos.y += 1;
++
+ void PROJECTILE::tick()
+ {
+-	
+-	float pt = (server_tick()-start_tick-1)/(float)server_tickspeed();
+-	float ct = (server_tick()-start_tick)/(float)server_tickspeed();
+-	vec2 prevpos = get_pos(pt);
+-	vec2 curpos = get_pos(ct);
++	if(config.sv_ball_mod)
++	{
++		bool explode = false;
++		float nt = (server_tick()-start_tick+1)/(float)server_tickspeed();
++		float ct = (server_tick()-start_tick)/(float)server_tickspeed();
++		float pt = (server_tick()-start_tick-1)/(float)server_tickspeed();
++		vec2 curpos = get_pos(ct);
++		vec2 prevpos = get_pos(pt);
++		vec2 free_pos = vec2(0,0);
++		vec2 col_pos = vec2(0,0);
++		int action_tile = col_is_action_tile(curpos.x, curpos.y);
++		float free_time = -1.0f;
++		
++		float steps = 1.0/config.sv_calc_steps;
++		if(col_is_ball_reset(curpos.x, curpos.y) && game.controller->action_ball_reset != 0)
++		{
++			explode = true;
++			goto ball_explode;
++		}
++		if (col_is_speedup(curpos.x, curpos.y) && game.controller->action_speedup != 0)
++		{
++			vec2 velocity = vec2(direction.x, (direction.y + 2*tuning.grenade_curvature/10000*tuning.grenade_speed*ct));
++			float vec_length = sqrt(velocity.x*velocity.x + velocity.y*velocity.y);
++			vec2 normalized = vec2(velocity.x/vec_length, velocity.y/vec_length);
++			direction.x += normalized.x*(float)config.sv_accelerate/100000.0;
++			direction.y = velocity.y + normalized.y*(float)config.sv_accelerate/100000.0;
++			pos = curpos;
++			start_tick = server_tick();
++			nt = 1/(float)server_tickspeed();
++			ct = 0;
++			pt = -nt;
++		}
++		else if (col_is_speedup_up(curpos.x, curpos.y) && game.controller->action_speedup_up != 0)
++		{
++			vec2 velocity = vec2(direction.x, (direction.y + 2*tuning.grenade_curvature/10000*tuning.grenade_speed*ct));
++			direction.y = velocity.y - (float)config.sv_accelerate_up/100000.0;
++			pos = curpos;
++			start_tick = server_tick();
++			nt = 1/(float)server_tickspeed();
++			ct = 0;
++			pt = -nt;
++		}
++		else if (col_is_speedup_right(curpos.x, curpos.y) && game.controller->action_speedup_right != 0)
++		{
++			vec2 velocity = vec2(direction.x, (direction.y + 2*tuning.grenade_curvature/10000*tuning.grenade_speed*ct));
++			direction.x += (float)config.sv_accelerate_right/100000.0;
++			direction.y = velocity.y;
++			pos = curpos;
++			start_tick = server_tick();
++			nt = 1/(float)server_tickspeed();
++			ct = 0;
++			pt = -nt;
++		}
++		else if (col_is_speedup_down(curpos.x, curpos.y) && game.controller->action_speedup_down != 0)
++		{
++			vec2 velocity = vec2(direction.x, (direction.y + 2*tuning.grenade_curvature/10000*tuning.grenade_speed*ct));
++			direction.y = velocity.y + (float)config.sv_accelerate_down/100000.0;
++			pos = curpos;
++			start_tick = server_tick();
++			nt = 1/(float)server_tickspeed();
++			ct = 0;
++			pt = -nt;
++		}
++		else if (col_is_speedup_left(curpos.x, curpos.y) && game.controller->action_speedup_left != 0)
++		{
++			vec2 velocity = vec2(direction.x, (direction.y + 2*tuning.grenade_curvature/10000*tuning.grenade_speed*ct));
++			direction.x -= (float)config.sv_accelerate_left/100000.0;
++			direction.y = velocity.y;
++			pos = curpos;
++			start_tick = server_tick();
++			nt = 1/(float)server_tickspeed();
++			ct = 0;
++			pt = -nt;
++		}
++		else if (col_is_slowdown(curpos.x, curpos.y) && game.controller->action_slowdown != 0)
++		{
++			vec2 velocity = vec2(direction.x, (direction.y + 2*tuning.grenade_curvature/10000*tuning.grenade_speed*ct));
++			direction.x = velocity.x * (100000-config.sv_brake)/100000.0;
++			direction.y = velocity.y * (100000-config.sv_brake)/100000.0;
++			pos = curpos;
++			start_tick = server_tick();
++			nt = 1/(float)server_tickspeed();
++			ct = 0;
++			pt = -nt;
++		}
++		else if(action_tile)
++		{
++			switch(action_tile)
++			{
++				case 1:
++					if(config.sv_action_1_cause == 0)
++					{
++						game.controller->action_parser(config.sv_action_1_tile, config.sv_action_1_type, config.sv_action_1_cmd);
++					}
++					break;
++				case 2:
++					if(config.sv_action_2_cause == 0)
++					{
++						game.controller->action_parser(config.sv_action_2_tile, config.sv_action_2_type, config.sv_action_2_cmd);
++					}
++					break;
++				case 3:
++					if(config.sv_action_3_cause == 0)
++					{
++						game.controller->action_parser(config.sv_action_3_tile, config.sv_action_3_type, config.sv_action_3_cmd);
++					}
++					break;
++				case 4:
++					if(config.sv_action_4_cause == 0)
++					{
++						game.controller->action_parser(config.sv_action_4_tile, config.sv_action_4_type, config.sv_action_4_cmd);
++					}
++					break;
++				case 5:
++					if(config.sv_action_5_cause == 0)
++					{
++						game.controller->action_parser(config.sv_action_5_tile, config.sv_action_5_type, config.sv_action_5_cmd);
++					}
++					break;
++				case 6:
++					if(config.sv_action_6_cause == 0)
++					{
++						game.controller->action_parser(config.sv_action_6_tile, config.sv_action_6_type, config.sv_action_6_cmd);
++					}
++					break;
++			}
++		}
++		if (col_is_random(curpos.x, curpos.y) && game.controller->action_random != 0)
++		{
++			if(!randomized)
++			{
++				vec2 velocity = vec2(direction.x, (direction.y + 2*tuning.grenade_curvature/10000*tuning.grenade_speed*ct));
++				float random = rand()/10000.0;
++				float vec_length = sqrt(velocity.x*velocity.x + velocity.y*velocity.y);
++				direction = vec2(sin(random)*vec_length, cos(random)*vec_length);
++				randomized = true;
++				pos = curpos;
++				start_tick = server_tick();
++				nt = 1/(float)server_tickspeed();
++				ct = 0;
++				pt = -nt;
++			}
++		}
++		else
++		{
++			randomized = false;
++		}
++		
++		
++		
++		float i;
++		for(i = ct+steps; i <= nt; i += steps)
++		{
++			vec2 tmp_pos = get_pos(i);
++			if(col_is_solid((int)tmp_pos.x+5, (int)tmp_pos.y+5))
++			{
++				break;
++			}
++			else if(col_is_solid((int)tmp_pos.x+5, (int)tmp_pos.y-5))
++			{
++				break;
++			}
++			else if(col_is_solid((int)tmp_pos.x-5, (int)tmp_pos.y+5))
++			{
++				break;
++			}
++			else if(col_is_solid((int)tmp_pos.x-5, (int)tmp_pos.y-5))
++			{
++				break;
++			}
++			free_time = i;
++		}
++		
++		
++		
++		if(free_time == -1.0f)
++		{
++			pick_up_again = 0;
++			explode = true;
++			for(float st = ct; st > ct-1.0f; st -= steps)			// i changed from ct-1.0f
++			{
++				vec2 search_pos = get_pos(st);
++				if(!(col_is_solid((int)search_pos.x+5, (int)search_pos.y+5) || col_is_solid((int)search_pos.x+5, (int)search_pos.y-5) || col_is_solid((int)search_pos.x-5, (int)search_pos.y+5) || col_is_solid((int)search_pos.x-5, (int)search_pos.y-5)))
++				{
++					free_time = st;
++					col_pos = get_pos(st+steps);
++					free_pos = get_pos(st);
++					explode = false;
++					break;
++				}
++			}
++		}
++		else
++		{
++			free_time += ct;
++			col_pos = get_pos(free_time+steps);
++			free_pos = get_pos(free_time);
++		}
++		if(free_time < nt-steps)
++		{
++			bool coll[4] = {false,false,false,false};
++			coll[0] = col_is_solid((int)col_pos.x+5, (int)col_pos.y+5);
++			coll[1] = col_is_solid((int)col_pos.x+5, (int)col_pos.y-5);
++			coll[2] = col_is_solid((int)col_pos.x-5, (int)col_pos.y+5);
++			coll[3] = col_is_solid((int)col_pos.x-5, (int)col_pos.y-5);
++			
++			short int colliding_points = 0;
++			if(coll[0])
++			{
++				colliding_points++;
++			}
++			if(coll[1])
++			{
++				colliding_points++;
++			}
++			if(coll[2])
++			{
++				colliding_points++;
++			}
++			if(coll[3])
++			{
++				colliding_points++;
++			}
++			
++			vec2 velocity;
++			if(col_is_bumper_random(free_pos.x, free_pos.y) && !randomized && game.controller->action_bumper_random != 0)
++			{
++				vec2 velocity_tmp = vec2(direction.x, (direction.y + 2*tuning.grenade_curvature/10000*tuning.grenade_speed*ct));
++				float random = rand()/10000.0;
++				float vec_length = sqrt(velocity_tmp.x*velocity_tmp.x + velocity_tmp.y*velocity_tmp.y);
++				velocity = vec2(sin(random)*vec_length, cos(random)*vec_length);
++			}
++			else
++			{
++				velocity = vec2(direction.x/(config.sv_bounce_loss_x+100)*100, (direction.y + 2*tuning.grenade_curvature/10000*tuning.grenade_speed*(server_tick()-start_tick)/(float)server_tickspeed())/(config.sv_bounce_loss_y+100)*100);
++			}
++			if(colliding_points == 1)
++			{
++				if(config.sv_conservative_collision)
++				{
++					if(coll[0])
++					{
++						if(velocity.x > velocity.y)
++						{
++							direction.x = -velocity.x;
++							direction.y = velocity.y;
++						}
++						else
++						{
++							direction.x = velocity.x;
++							direction.y = -velocity.y;
++						}
++					}
++					else if(coll[1])
++					{
++						if(velocity.x > -velocity.y)
++						{
++							direction.x = -velocity.x;
++							direction.y = velocity.y;
++						}
++						else
++						{
++							direction.x = velocity.x;
++							direction.y = -velocity.y;
++						}
++					}
++					else if(coll[2])
++					{
++						if(-velocity.x > velocity.y)
++						{
++							direction.x = -velocity.x;
++							direction.y = velocity.y;
++						}
++						else
++						{
++							direction.x = velocity.x;
++							direction.y = -velocity.y;
++						}
++					}
++					else if(coll[3])
++					{
++						if(-velocity.x > -velocity.y)
++						{
++							direction.x = -velocity.x;
++							direction.y = velocity.y;
++						}
++						else
++						{
++							direction.x = velocity.x;
++							direction.y = -velocity.y;
++						}
++					}
++				}
++				else if(coll[0])
++				{
++					VERTEX_DOWN_RIGHT(5,5)
++				}
++				else if(coll[1])
++				{
++					VERTEX_UP_RIGHT(5,-5)
++				}
++				else if(coll[2])
++				{
++					VERTEX_DOWN_LEFT(-5,5)
++				}
++				else if(coll[3])
++				{
++					VERTEX_UP_LEFT(-5,-5)
++				}
++			}
++			else if(colliding_points == 3)
++			{
++				direction.x = -velocity.x;
++				direction.y = -velocity.y;
++			}
++			else if(colliding_points == 2)
++			{
++				int coll_neighb[2];
++				coll_neighb[0] = 0;
++				coll_neighb[1] = 0;
++				if(coll[0] && coll[1])
++				{
++					coll_neighb[0] = col_is_solid((int)col_pos.x+5, (int)col_pos.y-32);
++					coll_neighb[1] = col_is_solid((int)col_pos.x+5, (int)col_pos.y+32);
++					if(coll_neighb[0] && coll_neighb[1])
++					{
++						direction.x = -velocity.x;
++						direction.y = velocity.y;
++					}
++					else if(coll_neighb[0])
++					{
++						VERTEX_UP_RIGHT(5,0)
++					}
++					else if(coll_neighb[1])
++					{
++						VERTEX_DOWN_RIGHT(5,0)
++					}
++					else
++					{
++						direction.x = -velocity.x;
++						direction.y = velocity.y;
++					}
++				}
++				else if(coll[1] && coll[3])
++				{
++					coll_neighb[0] = col_is_solid((int)col_pos.x-32, (int)col_pos.y-5);
++					coll_neighb[1] = col_is_solid((int)col_pos.x+32, (int)col_pos.y-5);
++					if(coll_neighb[0] && coll_neighb[1])
++					{
++						direction.x = velocity.x;
++						direction.y = -velocity.y;
++					}
++					else if(coll_neighb[0])
++					{
++						VERTEX_UP_LEFT(0,-5)
++					}
++					else if(coll_neighb[1])
++					{
++						VERTEX_UP_RIGHT(0,-5)
++					}
++					else
++					{
++						direction.x = velocity.x;
++						direction.y = -velocity.y;
++					}
++				}
++				else if(coll[3] && coll[2])
++				{
++					coll_neighb[0] = col_is_solid((int)col_pos.x-5, (int)col_pos.y-32);
++					coll_neighb[1] = col_is_solid((int)col_pos.x-5, (int)col_pos.y+32);
++					if(coll_neighb[0] && coll_neighb[1])
++					{
++						direction.x = -velocity.x;
++						direction.y = velocity.y;
++					}
++					else if(coll_neighb[0])
++					{
++						VERTEX_UP_LEFT(-5,0)
++					}
++					else if(coll_neighb[1])
++					{
++						VERTEX_DOWN_LEFT(-5,0)
++					}
++					else
++					{
++						direction.x = -velocity.x;
++						direction.y = velocity.y;
++					}
++				}
++				else if(coll[2] && coll[0])
++				{
++					coll_neighb[0] = col_is_solid((int)col_pos.x-32, (int)col_pos.y+5);
++					coll_neighb[1] = col_is_solid((int)col_pos.x+32, (int)col_pos.y+5);
++					if(coll_neighb[0] && coll_neighb[1])
++					{
++						direction.x = velocity.x;
++						direction.y = -velocity.y;
++					}
++					else if(coll_neighb[0])
++					{
++						VERTEX_DOWN_LEFT(0,5)
++					}
++					else if(coll_neighb[1])
++					{
++						VERTEX_DOWN_RIGHT(0,5)
++					}
++					else
++					{
++						direction.x = velocity.x;
++						direction.y = -velocity.y;
++					}
++				}
++			}
++			else
++			{
++				if(col_is_solid((int)col_pos.x, (int)free_pos.y))
++				{
++					direction.x = -velocity.x;
++					direction.y = velocity.y;
++				}
++				else if(col_is_solid((int)free_pos.x, (int)col_pos.y))
++				{
++					direction.x = velocity.x;
++					direction.y = -velocity.y;
++				}
++				else
++				{
++					direction.x = -velocity.x;
++					direction.y = -velocity.y;
++				}
++			}
++			pos.x = free_pos.x - direction.x*(ct-free_time);
++			pos.y = free_pos.y - (direction.y + (ct-free_time)*2*tuning.grenade_curvature/10000*tuning.grenade_speed);
++			if(col_is_bumper_speedup(free_pos.x, free_pos.y) && game.controller->action_bumper_speedup != 0)
++			{
+ 
+-	lifespan--;
+-	
+-	int collide = col_intersect_line(prevpos, curpos, &curpos, 0);
+-	//int collide = col_check_point((int)curpos.x, (int)curpos.y);
+-	CHARACTER *ownerchar = game.get_player_char(owner);
+-	CHARACTER *targetchr = game.world.intersect_character(prevpos, curpos, 6.0f, curpos, ownerchar);
+-	if(targetchr || collide || lifespan < 0)
++				float vec_length = sqrt(direction.x*direction.x + direction.y*direction.y);
++				vec2 normalized = vec2(direction.x/vec_length, direction.y/vec_length);
++				direction.x += normalized.x*(float)config.sv_bumper_accelerate/1000.0;
++				direction.y += normalized.y*(float)config.sv_bumper_accelerate/1000.0;
++			}
++			else if(col_is_bumper_slowdown(free_pos.x, free_pos.y) && game.controller->action_bumper_slowdown != 0)
++			{
++				direction.x = velocity.x * (config.sv_bumper_brake - 100000)/100000.0;
++				direction.y = velocity.y * (config.sv_bumper_brake - 100000)/100000.0;
++			}
++			start_tick = server_tick();
++			pick_up_again = 0;
++		}
++ball_explode:
++		CHARACTER *targetchr;
++		if(pick_up_again == 0)
++		{
++			targetchr = game.world.intersect_character(prevpos, curpos, 6.0f, curpos, NULL);
++		}
++		else
++		{
++			pick_up_again--;
++			targetchr = game.world.intersect_character(prevpos, curpos, 6.0f, curpos, game.get_player_char(owner));
++		}
++		game.controller->ball = curpos;
++		if((targetchr && (targetchr->armor > 0 || config.sv_pickup_with_no_armor)) || --lifespan < 0 || explode)
++		{
++			if(explode || lifespan < 0)
++			{
++				game.controller->spawning = server_tick();
++			}
++			if(config.sv_explosions && (lifespan >= 0 || weapon == WEAPON_GRENADE))
++				game.create_sound(curpos, sound_impact);
++
++			if(flags & PROJECTILE_FLAGS_EXPLODE && config.sv_explosions)
++				game.create_explosion(curpos, owner, weapon, false);
++			else if(targetchr)
++			{
++				// matthis
++				// catch the ball
++				targetchr->player->get_ball_time = server_tick();
++
++				game.controller->passer = owner;
++				targetchr->weapons[WEAPON_GRENADE].got = true;
++				if(targetchr->weapons[WEAPON_GRENADE].ammo < 10)
++					targetchr->weapons[WEAPON_GRENADE].ammo++;
++				targetchr->active_weapon = WEAPON_GRENADE;
++				targetchr->last_weapon = WEAPON_GRENADE;
++				if(targetchr->player->goalkeeper)
++					targetchr->fire_ball_tick = server_tick()+server_tickspeed()*config.sv_goal_keeptime;
++				else
++					targetchr->fire_ball_tick = server_tick()+server_tickspeed()*config.sv_player_keeptime;
++				targetchr->reload_timer = config.sv_ball_reloader;
++			}
++
++			game.world.destroy_entity(this);
++		}
++		else if (col_is_red((int)curpos.x,(int)curpos.y) && owner > -1 && game.players[owner] && game.players[owner]->team != -1)
++		{
++			game.world.destroy_entity(this);
++			game.controller->on_player_goal(game.players[owner], 0);
++		}
++		else if (col_is_blue((int)curpos.x,(int)curpos.y) && owner > -1 && game.players[owner] && game.players[owner]->team != -1)
++		{
++			game.world.destroy_entity(this);
++			game.controller->on_player_goal(game.players[owner], 1);
++		}
++	}
++	else
+ 	{
+-		if(lifespan >= 0 || weapon == WEAPON_GRENADE)
+-			game.create_sound(curpos, sound_impact);
++		float pt = (server_tick()-start_tick-1)/(float)server_tickspeed();
++		float ct = (server_tick()-start_tick)/(float)server_tickspeed();
++		vec2 prevpos = get_pos(pt);
++		vec2 curpos = get_pos(ct);
++
++		lifespan--;
++	
++		int collide = col_intersect_line(prevpos, curpos, &curpos, 0);
++		//int collide = col_check_point((int)curpos.x, (int)curpos.y);
++		CHARACTER *ownerchar = game.get_player_char(owner);
++		CHARACTER *targetchr = game.world.intersect_character(prevpos, curpos, 6.0f, curpos, ownerchar);
++		if(targetchr || collide || lifespan < 0)
++		{
++			if(lifespan >= 0 || weapon == WEAPON_GRENADE)
++				game.create_sound(curpos, sound_impact);
+ 
+-		if(flags & PROJECTILE_FLAGS_EXPLODE)
+-			game.create_explosion(curpos, owner, weapon, false);
+-		else if(targetchr)
+-			targetchr->take_damage(direction * max(0.001f, force), damage, owner, weapon);
++			if(flags & PROJECTILE_FLAGS_EXPLODE)
++				game.create_explosion(curpos, owner, weapon, false);
++			else if(targetchr)
++				targetchr->take_damage(direction * max(0.001f, force), damage, owner, weapon);
+ 
+-		game.world.destroy_entity(this);
++			game.world.destroy_entity(this);
++		}
+ 	}
+ }
+ 
+diff -Naur teeworlds-0.5.2-src/src/game/server/entities/projectile.hpp modpack/src/game/server/entities/projectile.hpp
+--- teeworlds-0.5.2-src/src/game/server/entities/projectile.hpp	2009-10-26 19:04:31.000000000 +0100
++++ modpack/src/game/server/entities/projectile.hpp	2010-05-25 20:36:35.000000000 +0200
+@@ -23,6 +23,9 @@
+ 	float force;
+ 	int start_tick;
+ 	
++	int pick_up_again;
++	bool randomized;
++	
+ 	PROJECTILE(int type, int owner, vec2 pos, vec2 vel, int span,
+ 		int damage, int flags, float force, int sound_impact, int weapon);
+ 
+diff -Naur teeworlds-0.5.2-src/src/game/server/gamecontext.cpp modpack/src/game/server/gamecontext.cpp
+--- teeworlds-0.5.2-src/src/game/server/gamecontext.cpp	2009-10-26 19:04:31.000000000 +0100
++++ modpack/src/game/server/gamecontext.cpp	2010-05-25 20:36:35.000000000 +0200
+@@ -1,6 +1,7 @@
+ #include <string.h>
+ #include <new>
+ #include <engine/e_server_interface.h>
++#include <engine/e_config.h>
+ #include "gamecontext.hpp"
+ 
+ GAMECONTEXT game;
+@@ -178,6 +179,10 @@
+ 	else
+ 		dbg_msg("chat", "*** %s", text);
+ 
++	if((config.sv_silent_mode && chatter_cid == -1) || (config.sv_total_silence))
++		return;
++	if(config.sv_spec_silence && chatter_cid >= 0 && chatter_cid < MAX_CLIENTS && game.players[chatter_cid] && game.players[chatter_cid]->team == -1)
++		team = -1;
+ 	if(team == CHAT_ALL)
+ 	{
+ 		NETMSG_SV_CHAT msg;
+@@ -347,6 +352,11 @@
+ 		
+ 			if(vote_enforce == VOTE_ENFORCE_YES || yes >= total/2+1)
+ 			{
++				if(strncmp(vote_command, "change_map", 10) == 0)
++				{
++					controller->cwscore[0] = 0;
++					controller->cwscore[1] = 0;
++				}
+ 				console_execute_line(vote_command);
+ 				end_vote();
+ 				send_chat(-1, GAMECONTEXT::CHAT_ALL, "Vote passed");
+diff -Naur teeworlds-0.5.2-src/src/game/server/gamecontroller.cpp modpack/src/game/server/gamecontroller.cpp
+--- teeworlds-0.5.2-src/src/game/server/gamecontroller.cpp	2009-10-26 19:04:31.000000000 +0100
++++ modpack/src/game/server/gamecontroller.cpp	2010-05-26 18:47:01.479293549 +0200
+@@ -25,6 +25,8 @@
+ 	game_flags = 0;
+ 	teamscore[0] = 0;
+ 	teamscore[1] = 0;
++	cwscore[0] = 0;
++	cwscore[1] = 1;
+ 	map_wish[0] = 0;
+ 	
+ 	unbalanced_tick = -1;
+@@ -33,6 +35,8 @@
+ 	num_spawn_points[0] = 0;
+ 	num_spawn_points[1] = 0;
+ 	num_spawn_points[2] = 0;
++	num_spawn_points[3] = 0;
++	num_spawn_points[4] = 0;
+ }
+ 
+ GAMECONTROLLER::~GAMECONTROLLER()
+@@ -120,6 +124,10 @@
+ 		spawn_points[1][num_spawn_points[1]++] = pos;
+ 	else if(index == ENTITY_SPAWN_BLUE)
+ 		spawn_points[2][num_spawn_points[2]++] = pos;
++	else if(index == ENTITY_SPAWN_KEEPER_RED)
++		spawn_points[3][num_spawn_points[3]++] = pos;
++	else if(index == ENTITY_SPAWN_KEEPER_BLUE)
++		spawn_points[4][num_spawn_points[4]++] = pos;
+ 	else if(index == ENTITY_ARMOR_1)
+ 		type = POWERUP_ARMOR;
+ 	else if(index == ENTITY_HEALTH_1)
+@@ -159,7 +167,18 @@
+ {
+ 	if(warmup) // game can't end when we are running warmup
+ 		return;
+-		
++	
++	if(config.sv_cwscore)
++	{
++		if(teamscore[0] > teamscore[1])
++			cwscore[0]++;
++		else if(teamscore[1] > teamscore[0])
++			cwscore[1]++;
++		char buf[512];
++		str_format(buf,sizeof(buf), "Clanwar score: Red: %i Blue: %i", cwscore[0], cwscore[1]);
++		game.send_chat(-1,-2, buf);
++	}
++	
+ 	game.world.paused = true;
+ 	game_over_tick = server_tick();
+ 	sudden_death = 0;
+diff -Naur teeworlds-0.5.2-src/src/game/server/gamecontroller.hpp modpack/src/game/server/gamecontroller.hpp
+--- teeworlds-0.5.2-src/src/game/server/gamecontroller.hpp	2009-10-26 19:04:31.000000000 +0100
++++ modpack/src/game/server/gamecontroller.hpp	2010-05-25 20:36:35.000000000 +0200
+@@ -10,8 +10,8 @@
+ */
+ class GAMECONTROLLER
+ {
+-	vec2 spawn_points[3][64];
+-	int num_spawn_points[3];
++	vec2 spawn_points[5][64];
++	int num_spawn_points[5];
+ protected:
+ 	struct SPAWNEVAL
+ 	{
+@@ -42,7 +42,7 @@
+ 	int game_over_tick;
+ 	int sudden_death;
+ 	
+-	int teamscore[2];
++	
+ 	
+ 	int warmup;
+ 	int round_count;
+@@ -59,13 +59,13 @@
+ 	GAMECONTROLLER();
+ 	virtual ~GAMECONTROLLER();
+ 
+-	void do_team_score_wincheck();
++	virtual void do_team_score_wincheck();
+ 	void do_player_score_wincheck();
+ 	
+ 	void do_warmup(int seconds);
+ 	
+-	void startround();
+-	void endround();
++	virtual void startround();
++	virtual void endround();
+ 	void change_map(const char *to_map);
+ 	
+ 	bool is_friendly_fire(int cid1, int cid2);
+@@ -131,6 +131,30 @@
+ 	int clampteam(int team);
+ 
+ 	virtual void post_reset();
++	
++	int teamscore[2];
++	int cwscore[2];
++	int goalkeeper[2];
++	int passer;
++	int spawning;
++	int mod;
++	int projectile_pickup;
++	vec2 ball;
++	virtual void on_player_goal(class PLAYER *goaler,int goalteam){ return; }
++	virtual void action_parser(int tile, int action, const char* cmd){ return;}
++	
++	int action_bumper_speedup;
++	int action_speedup;
++	int action_speedup_up;
++	int action_speedup_right;
++	int action_speedup_down;
++	int action_speedup_left;
++	int action_bumper_slowdown;
++	int action_slowdown;
++	int action_bumper_random;
++	int action_random;
++	int action_ball_reset;
++	
+ };
+ 
+ #endif
+diff -Naur teeworlds-0.5.2-src/src/game/server/gamemodes/ball.cpp modpack/src/game/server/gamemodes/ball.cpp
+--- teeworlds-0.5.2-src/src/game/server/gamemodes/ball.cpp	1970-01-01 01:00:00.000000000 +0100
++++ modpack/src/game/server/gamemodes/ball.cpp	2010-05-25 21:19:28.000000000 +0200
+@@ -0,0 +1,342 @@
++#include <string.h>
++#include <engine/e_server_interface.h>
++#include <engine/e_config.h>
++#include <game/server/entities/character.hpp>
++#include <game/server/player.hpp>
++#include <game/server/gamecontext.hpp>
++#include <game/mapitems.hpp>
++#include "../entities/pickup.hpp"
++#include "ball.hpp"
++
++GAMECONTROLLER_BALL::GAMECONTROLLER_BALL()
++:GAMECONTROLLER_MOD()
++{
++	gametype = "BALL";
++	game_flags = GAMEFLAG_TEAMS;
++	goalkeeper[0] = 0;
++	goalkeeper[1] = 0;
++	config.sv_ball_mod = 1;
++	config.sv_ko_mod = 0;
++	projectile_pickup = 0;
++	action_bumper_speedup = (config.sv_bumper_speedup ? -1 : 0);
++	action_speedup = (config.sv_speedup ? -1 : 0);
++	action_speedup_up = (config.sv_speedup_up ? -1 : 0);
++	action_speedup_right = (config.sv_speedup_right ? -1 : 0);
++	action_speedup_down = (config.sv_speedup_down ? -1 : 0);
++	action_speedup_left = (config.sv_speedup_left ? -1 : 0);
++	action_bumper_slowdown = (config.sv_bumper_slowdown ? -1 : 0);
++	action_slowdown = (config.sv_slowdown ? -1 : 0);
++	action_bumper_random = (config.sv_bumper_random ? -1 : 0);
++	action_random = (config.sv_random ? -1 : 0);
++	action_ball_reset = (config.sv_ball_reset ? -1 : 0);
++}
++
++void GAMECONTROLLER_BALL::startround()
++{
++	GAMECONTROLLER_MOD::startround();
++	spawning = config.sv_ball_respawn*server_tickspeed() + server_tick();
++	projectile_pickup = 0;
++	action_bumper_speedup = (config.sv_bumper_speedup ? -1 : 0);
++	action_speedup = (config.sv_speedup ? -1 : 0);
++	action_speedup_up = (config.sv_speedup_up ? -1 : 0);
++	action_speedup_right = (config.sv_speedup_right ? -1 : 0);
++	action_speedup_down = (config.sv_speedup_down ? -1 : 0);
++	action_speedup_left = (config.sv_speedup_left ? -1 : 0);
++	action_bumper_slowdown = (config.sv_bumper_slowdown ? -1 : 0);
++	action_slowdown = (config.sv_slowdown ? -1 : 0);
++	action_bumper_random = (config.sv_bumper_random ? -1 : 0);
++	action_random = (config.sv_random ? -1 : 0);
++	action_ball_reset = (config.sv_ball_reset ? -1 : 0);
++}
++
++void GAMECONTROLLER_BALL::action_parser(int tile, int action, const char *cmd)
++{
++	switch(tile)
++	{
++		case 0:
++			action_bumper_speedup = action;
++			break;
++		case 1:
++			action_speedup = action;
++			break;
++		case 2:
++			action_speedup_up = action;
++			break;
++		case 3:
++			action_speedup_right = action;
++			break;
++		case 4:
++			action_speedup_down = action;
++			break;
++		case 5:
++			action_speedup_left = action;
++			break;
++		case 6:
++			action_bumper_slowdown = action;
++			break;
++		case 7:
++			action_slowdown = action;
++			break;
++		case 8:
++			action_bumper_random = action;
++			break;
++		case 9:
++			action_random = action;
++			break;
++		case 10:
++			action_ball_reset = action;
++			break;
++	}
++	if(cmd[0] != 0)
++		console_execute_line(cmd);
++}
++
++void GAMECONTROLLER_BALL::on_character_spawn(class CHARACTER *chr)
++{
++	if(config.sv_ball_mod)
++	{
++		if(config.sv_real_foot)
++			config.sv_start_hammer = 0;
++		else
++			config.sv_start_hammer = 1;
++		config.sv_start_pistol = 0;
++	}
++	if(config.sv_start_grenade)
++	{
++		chr->fire_ball_tick = server_tick() + config.sv_player_keeptime*server_tickspeed();
++	}
++	GAMECONTROLLER_MOD::on_character_spawn(chr);
++}
++
++int GAMECONTROLLER_BALL::on_character_death(class CHARACTER *victim, class PLAYER *killer, int weaponid)
++{
++	GAMECONTROLLER_MOD::on_character_death(victim, killer, weaponid);
++	if(killer && killer == victim->player)
++	{
++		if(victim->partly_dead)
++			killer->respawn_tick = victim->partly_dead + (config.sv_spawn_delay*server_tickspeed())/1000;
++		else
++			killer->respawn_tick = server_tick() + (config.sv_spawn_delay*server_tickspeed())/1000;
++	}
++	return 0;
++}
++
++void GAMECONTROLLER_BALL::on_player_goal(class PLAYER *goaler,int goalteam)
++{
++	if(config.sv_silent_mode != 1 && config.sv_goal_timer)
++	{
++		char tmp[100];
++		str_format(tmp, sizeof(tmp), "Goal shot after %.2f seconds", (float)(server_tick() - projectile_pickup)/(float)server_tickspeed());
++		game.send_chat(-1, GAMECONTEXT::CHAT_ALL, tmp);
++	}
++	projectile_pickup = 0;
++	PLAYER *passer_chr;
++	if(passer == -1)
++		passer_chr = NULL;
++	else
++		passer_chr = game.players[passer];
++	
++	char out_msg[512] = "";
++	if(!goaler)
++		goto reset_everything;
++	else
++	{
++		if(config.sv_passes_only == 1 && goaler->team != goalteam && (!passer_chr || passer_chr == goaler || goaler->team != passer_chr->team))
++		{
++			game.send_broadcast("Pass Goals only !\n( No Point! )", -1);
++			goto reset_everything;
++		}
++		else if(config.sv_passes_only == 0 || goaler->team == goalteam || (passer_chr && passer_chr != goaler && goaler->team == passer_chr->team))
++		{
++			strcpy(out_msg, server_clientname(goaler->client_id));
++			if(goalteam == 0)
++				strcat(out_msg, " scored for the Blue team");
++			else
++				strcat(out_msg, " scored for the Red team");
++			if(goaler->team == goalteam)
++				goaler->score-=config.sv_own_goal; // teamkill
++			else
++				goaler->score+=config.sv_goaler_score; // normal kill
++			teamscore[!goalteam]+=config.sv_team_score;
++		}
++	}
++	if(passer_chr && passer_chr != goaler && goaler->team != goalteam)
++	{
++		if(passer_chr->team != goalteam)
++		{
++			if(config.sv_new_pass_system == 0)
++			{
++				passer_chr->score+=config.sv_passer_score;
++				teamscore[!goalteam]+=config.sv_team_pass_score;
++				strcat(out_msg, "\nwith a pass from ");
++				strcat(out_msg, server_clientname(passer_chr->client_id));
++				dbg_msg("ball","goal=%d goaler=%d passer=%d", goalteam, goaler->client_id, passer_chr->client_id);
++			}
++			else
++			{
++				float pass_usability_time = (goaler->get_ball_time - passer_chr->last_shot_time)/(float)server_tickspeed();
++				float shot_usability_time = (server_tick() - goaler->last_shot_time)/(float)server_tickspeed();
++
++
++				if(shot_usability_time >= config.sv_shot_usability)
++				{
++					// passes only system
++					// punkte werden wieder abgezogen, message ausgegeben und zu reset_everything springen
++					if(config.sv_passes_only == 1)
++					{
++						goaler->score-=config.sv_goaler_score;
++						teamscore[!goalteam]-=config.sv_team_score;
++						game.send_broadcast("Pass Goals only !\n( No Point! )", -1);
++						goto reset_everything;
++					}
++					strcat(out_msg, "Goal was out of time!");
++
++					if(config.sv_silent_mode != 1)
++					{
++						char tmp[100];
++						str_format(tmp, sizeof(tmp), "Luckgoal?! no points for pass (%.2f sec too late)", (float)(config.sv_shot_usability-shot_usability_time));
++						game.send_chat(-1, GAMECONTEXT::CHAT_ALL, tmp);
++					}
++
++					dbg_msg("ball","goal=%d goaler=%d passer=%d", goalteam, goaler->client_id, -1);
++				}
++				else if(pass_usability_time <= config.sv_pass_usability)
++				{
++					passer_chr->score+=config.sv_passer_score;
++					teamscore[!goalteam]+=config.sv_team_pass_score;
++
++					strcat(out_msg, "\nwith a pass from ");
++					strcat(out_msg, server_clientname(passer_chr->client_id));
++
++					if(config.sv_silent_mode != 1)
++					{
++						char tmp[100];
++						str_format(tmp, sizeof(tmp), "The pass lasts %.2f seconds.", pass_usability_time);
++						game.send_chat(-1, GAMECONTEXT::CHAT_ALL, tmp);
++					}
++
++					dbg_msg("ball","goal=%d goaler=%d passer=%d", goalteam, goaler->client_id, passer_chr->client_id);
++				}
++				else
++				{
++					// passes only system
++					// punkte werden wieder abgezogen, message ausgegeben und zu reset_everything springen
++					if(config.sv_passes_only == 1)
++					{
++						goaler->score-=config.sv_goaler_score;
++						teamscore[!goalteam]-=config.sv_team_score;
++						game.send_broadcast("Pass Goals only !\n( No Point! )", -1);
++						goto reset_everything;
++					}
++					// otherwise the passer doesn't get any points
++					strcat(out_msg, "\npass was out of time ...");
++
++					if(config.sv_silent_mode != 1)
++					{
++						char tmp[100];
++						str_format(tmp, sizeof(tmp), "The pass was %.2f seconds too long.", (float)(pass_usability_time-config.sv_pass_usability));
++						game.send_chat(-1, GAMECONTEXT::CHAT_ALL, tmp);
++					}
++
++					dbg_msg("ball","goal=%d goaler=%d passer=%d", goalteam, goaler->client_id, -1);
++				}
++			}
++		}
++		else
++			dbg_msg("ball","goal=%d goaler=%d passer=%d", goalteam, goaler->client_id, -1);
++	}
++	else
++		dbg_msg("ball","goal=%d goaler=%d passer=%d", goalteam, goaler->client_id, -1);
++	
++	game.send_broadcast(out_msg, -1);
++	
++reset_everything:
++	passer = -1;
++	if(config.sv_passes_only == 0 ||
++	(config.sv_owngoal_respawn == 1 && goaler->team == goalteam) ||
++	(passer_chr != NULL && passer_chr != goaler && goaler->team == passer_chr->team))
++	{
++		CHARACTER *tmp;
++		for (int i=0;i < MAX_CLIENTS ;i++)
++		{
++			if(game.players[i])
++			{
++				if((tmp = game.players[i]->get_character()) != NULL)
++				{
++					tmp->player->respawn_tick = server_tick() + (config.sv_spawn_delay*server_tickspeed())/1000;
++					tmp->reset();
++				}
++				else if(game.players[i]->respawn_tick < server_tick() + (config.sv_spawn_delay*server_tickspeed())/1000)
++				{
++					game.players[i]->respawn_tick = server_tick() + (config.sv_spawn_delay*server_tickspeed())/1000;
++				}
++			}
++		}
++	}
++	game.create_sound_global(SOUND_CTF_CAPTURE);
++	spawning = server_tick() + config.sv_ball_respawn*server_tickspeed();
++	game.world.remove_entities();
++	game.world.remove_projectiles();
++	action_bumper_speedup = (config.sv_bumper_speedup ? -1 : 0);
++	action_speedup = (config.sv_speedup ? -1 : 0);
++	action_speedup_up = (config.sv_speedup_up ? -1 : 0);
++	action_speedup_right = (config.sv_speedup_right ? -1 : 0);
++	action_speedup_down = (config.sv_speedup_down ? -1 : 0);
++	action_speedup_left = (config.sv_speedup_left ? -1 : 0);
++	action_bumper_slowdown = (config.sv_bumper_slowdown ? -1 : 0);
++	action_slowdown = (config.sv_slowdown ? -1 : 0);
++	action_bumper_random = (config.sv_bumper_random ? -1 : 0);
++	action_random = (config.sv_random ? -1 : 0);
++	action_ball_reset = (config.sv_ball_reset ? -1 : 0);
++}
++
++bool GAMECONTROLLER_BALL::can_spawn(PLAYER *player, vec2 *out_pos)
++{
++	if(player->goalkeeper)
++	{
++		SPAWNEVAL eval;
++	
++		// spectators can't spawn
++		if(player->team == -1)
++			return false;
++		evaluate_spawn_type(&eval, 3+(player->team&1));
++
++		*out_pos = eval.pos;
++		return eval.got;
++	}
++	else
++	{
++		return GAMECONTROLLER::can_spawn(player, out_pos);
++	}
++}
++
++void GAMECONTROLLER_BALL::tick()
++{
++	if(server_tick()%server_tickspeed() == 0)
++	{
++		if(action_bumper_speedup > 0)
++			action_bumper_speedup--;
++		if(action_speedup > 0)
++			action_speedup--;
++		if(action_speedup_up > 0)
++			action_speedup_up--;
++		if(action_speedup_right > 0)
++			action_speedup_right--;
++		if(action_speedup_down > 0)
++			action_speedup_down--;
++		if(action_speedup_left > 0)
++			action_speedup_left--;
++		if(action_bumper_slowdown > 0)
++			action_bumper_slowdown--;
++		if(action_slowdown > 0)
++			action_slowdown--;
++		if(action_bumper_random > 0)
++			action_bumper_random--;
++		if(action_random > 0)
++			action_random--;
++		if(action_ball_reset > 0)
++			action_ball_reset--;
++	}
++	do_team_score_wincheck();
++	GAMECONTROLLER_MOD::tick();
++}
+\ No newline at end of file
+diff -Naur teeworlds-0.5.2-src/src/game/server/gamemodes/ball.hpp modpack/src/game/server/gamemodes/ball.hpp
+--- teeworlds-0.5.2-src/src/game/server/gamemodes/ball.hpp	1970-01-01 01:00:00.000000000 +0100
++++ modpack/src/game/server/gamemodes/ball.hpp	2010-05-25 20:36:35.000000000 +0200
+@@ -0,0 +1,15 @@
++#include <game/server/gamemodes/mod.hpp>
++
++class GAMECONTROLLER_BALL : public GAMECONTROLLER_MOD
++{
++public:
++	GAMECONTROLLER_BALL();
++	virtual void on_player_goal(class PLAYER *goaler,int goalteam);
++	virtual int on_character_death(class CHARACTER *victim, class PLAYER *killer, int weapon);
++	virtual void on_character_spawn(class CHARACTER *chr);
++	virtual bool can_spawn(PLAYER *player, vec2 *out_pos);
++	void startround();
++	virtual void tick();
++	virtual void action_parser(int tile, int action, const char* cmd);
++};
++
+diff -Naur teeworlds-0.5.2-src/src/game/server/gamemodes/ctfmod.cpp modpack/src/game/server/gamemodes/ctfmod.cpp
+--- teeworlds-0.5.2-src/src/game/server/gamemodes/ctfmod.cpp	1970-01-01 01:00:00.000000000 +0100
++++ modpack/src/game/server/gamemodes/ctfmod.cpp	2010-05-25 20:51:39.000000000 +0200
+@@ -0,0 +1,191 @@
++#include <engine/e_server_interface.h>
++#include <game/mapitems.hpp>
++#include <game/server/entities/character.hpp>
++#include <game/server/player.hpp>
++#include <game/server/gamecontext.hpp>
++#include "ctf.hpp"
++#include "ctfmod.hpp"
++
++GAMECONTROLLER_CTFMOD::GAMECONTROLLER_CTFMOD()
++:GAMECONTROLLER_MOD()
++{
++	flags[0] = 0;
++	flags[1] = 0;
++	gametype = "mCTF";
++	game_flags = GAMEFLAG_TEAMS|GAMEFLAG_FLAGS;
++}
++
++bool GAMECONTROLLER_CTFMOD::on_entity(int index, vec2 pos)
++{
++	if(GAMECONTROLLER_MOD::on_entity(index, pos))
++		return true;
++	
++	int team = -1;
++	if(index == ENTITY_FLAGSTAND_RED) team = 0;
++	if(index == ENTITY_FLAGSTAND_BLUE) team = 1;
++	if(team == -1)
++		return false;
++		
++	FLAG *f = new FLAG(team);
++	f->stand_pos = pos;
++	f->pos = pos;
++	flags[team] = f;
++	return true;
++}
++
++int GAMECONTROLLER_CTFMOD::on_character_death(class CHARACTER *victim, class PLAYER *killer, int weaponid)
++{
++	GAMECONTROLLER_MOD::on_character_death(victim, killer, weaponid);
++	int had_flag = 0;
++	
++	// drop flags
++	for(int fi = 0; fi < 2; fi++)
++	{
++		FLAG *f = flags[fi];
++		if(f && killer && f->carrying_character == killer->get_character())
++			had_flag |= 2;
++		if(f && f->carrying_character == victim)
++		{
++			game.create_sound_global(SOUND_CTF_DROP);
++			f->drop_tick = server_tick();
++			f->carrying_character = 0;
++			f->vel = vec2(0,0);
++			
++			if(killer && killer->team != victim->team)
++				killer->score++;
++				
++			had_flag |= 1;
++		}
++	}
++	
++	return had_flag;
++}
++
++void GAMECONTROLLER_CTFMOD::tick()
++{
++	GAMECONTROLLER_MOD::tick();
++
++	do_team_score_wincheck();
++	
++	for(int fi = 0; fi < 2; fi++)
++	{
++		FLAG *f = flags[fi];
++		
++		if(!f)
++			continue;
++		
++		// flag hits death-tile, reset it
++		if(col_get((int)f->pos.x, (int)f->pos.y)&COLFLAG_DEATH)
++		{
++			f->reset();
++			continue;
++		}
++		
++		//
++		if(f->carrying_character)
++		{
++			// update flag position
++			f->pos = f->carrying_character->pos;
++			
++			if(flags[fi^1] && flags[fi^1]->at_stand)
++			{
++				if(distance(f->pos, flags[fi^1]->pos) < 32)
++				{
++					// CAPTURE! \o/
++					teamscore[fi^1] += 100;
++					f->carrying_character->player->score += 5;
++
++					dbg_msg("game", "flag_capture player='%d:%s'",
++						f->carrying_character->player->client_id,
++						server_clientname(f->carrying_character->player->client_id));
++
++					char buf[512];
++					float capture_time = (server_tick() - f->grab_tick)/(float)server_tickspeed();
++					if(capture_time <= 60)
++					{
++						str_format(buf, sizeof(buf), "the %s flag was captured by %s (%d.%s%d seconds)", fi ? "blue" : "red", server_clientname(f->carrying_character->player->client_id), (int)capture_time%60, ((int)(capture_time*100)%100)<10?"0":"", (int)(capture_time*100)%100);
++					}
++					else
++					{
++						str_format(buf, sizeof(buf), "the %s flag was captured by %s", fi ? "blue" : "red", server_clientname(f->carrying_character->player->client_id));
++					}
++					game.send_chat(-1, -2, buf);
++						
++					for(int i = 0; i < 2; i++)
++						flags[i]->reset();
++					
++					game.create_sound_global(SOUND_CTF_CAPTURE);
++				}
++			}			
++		}
++		else
++		{
++			CHARACTER *close_characters[MAX_CLIENTS];
++			int num = game.world.find_entities(f->pos, 32.0f, (ENTITY**)close_characters, MAX_CLIENTS, NETOBJTYPE_CHARACTER);
++			for(int i = 0; i < num; i++)
++			{
++				if(!close_characters[i]->alive || close_characters[i]->player->team == -1 || col_intersect_line(f->pos, close_characters[i]->pos, NULL, NULL))
++					continue;
++				
++				if(close_characters[i]->team == f->team)
++				{
++					// return the flag
++					if(!f->at_stand)
++					{
++						CHARACTER *chr = close_characters[i];
++						chr->player->score += 1;
++
++						dbg_msg("game", "flag_return player='%d:%s'",
++							chr->player->client_id,
++							server_clientname(chr->player->client_id));
++
++						game.create_sound_global(SOUND_CTF_RETURN);
++						f->reset();
++					}
++				}
++				else
++				{
++					// take the flag
++					if(f->at_stand)
++					{
++						teamscore[fi^1]++;
++						f->grab_tick = server_tick();
++					}
++					f->at_stand = 0;
++					f->carrying_character = close_characters[i];
++					f->carrying_character->player->score += 1;
++
++					dbg_msg("game", "flag_grab player='%d:%s'",
++						f->carrying_character->player->client_id,
++						server_clientname(f->carrying_character->player->client_id));
++					
++					for(int c = 0; c < MAX_CLIENTS; c++)
++					{
++						if(!game.players[c])
++							continue;
++							
++						if(game.players[c]->team == fi)
++							game.create_sound_global(SOUND_CTF_GRAB_EN, game.players[c]->client_id);
++						else
++							game.create_sound_global(SOUND_CTF_GRAB_PL, game.players[c]->client_id);
++					}
++					break;
++				}
++			}
++			
++			if(!f->carrying_character && !f->at_stand)
++			{
++				if(server_tick() > f->drop_tick + server_tickspeed()*30)
++				{
++					game.create_sound_global(SOUND_CTF_RETURN);
++					f->reset();
++				}
++				else
++				{
++					f->vel.y += game.world.core.tuning.gravity;
++					move_box(&f->pos, &f->vel, vec2(f->phys_size, f->phys_size), 0.5f);
++				}
++			}
++		}
++	}
++}
+diff -Naur teeworlds-0.5.2-src/src/game/server/gamemodes/ctfmod.hpp modpack/src/game/server/gamemodes/ctfmod.hpp
+--- teeworlds-0.5.2-src/src/game/server/gamemodes/ctfmod.hpp	1970-01-01 01:00:00.000000000 +0100
++++ modpack/src/game/server/gamemodes/ctfmod.hpp	2010-05-25 20:36:35.000000000 +0200
+@@ -0,0 +1,14 @@
++#include <game/server/gamemodes/mod.hpp>
++#include <game/server/entity.hpp>
++
++class GAMECONTROLLER_CTFMOD : public GAMECONTROLLER_MOD
++{
++public:
++	class FLAG *flags[2];
++	
++	GAMECONTROLLER_CTFMOD();
++	virtual void tick();
++	
++	virtual bool on_entity(int index, vec2 pos);
++	virtual int on_character_death(class CHARACTER *victim, class PLAYER *killer, int weapon);
++};
+diff -Naur teeworlds-0.5.2-src/src/game/server/gamemodes/dmmod.cpp modpack/src/game/server/gamemodes/dmmod.cpp
+--- teeworlds-0.5.2-src/src/game/server/gamemodes/dmmod.cpp	1970-01-01 01:00:00.000000000 +0100
++++ modpack/src/game/server/gamemodes/dmmod.cpp	2010-05-25 20:51:30.000000000 +0200
+@@ -0,0 +1,13 @@
++#include "dmmod.hpp"
++
++GAMECONTROLLER_DMMOD::GAMECONTROLLER_DMMOD()
++:GAMECONTROLLER_MOD()
++{
++	gametype = "mDM";
++}
++
++void GAMECONTROLLER_DMMOD::tick()
++{
++	do_player_score_wincheck();
++	GAMECONTROLLER_MOD::tick();
++}
+diff -Naur teeworlds-0.5.2-src/src/game/server/gamemodes/dmmod.hpp modpack/src/game/server/gamemodes/dmmod.hpp
+--- teeworlds-0.5.2-src/src/game/server/gamemodes/dmmod.hpp	1970-01-01 01:00:00.000000000 +0100
++++ modpack/src/game/server/gamemodes/dmmod.hpp	2010-05-25 20:36:35.000000000 +0200
+@@ -0,0 +1,9 @@
++#include <game/server/gamemodes/mod.hpp>
++
++class GAMECONTROLLER_DMMOD : public GAMECONTROLLER_MOD
++{
++public:
++	GAMECONTROLLER_DMMOD();
++	void tick();
++};
++
+diff -Naur teeworlds-0.5.2-src/src/game/server/gamemodes/ko.cpp modpack/src/game/server/gamemodes/ko.cpp
+--- teeworlds-0.5.2-src/src/game/server/gamemodes/ko.cpp	1970-01-01 01:00:00.000000000 +0100
++++ modpack/src/game/server/gamemodes/ko.cpp	2010-05-25 20:50:24.000000000 +0200
+@@ -0,0 +1,112 @@
++#include <string.h>
++#include <engine/e_server_interface.h>
++#include <game/server/gamecontext.hpp>
++#include <engine/e_config.h>
++#include "ko.hpp"
++
++GAMECONTROLLER_KO::GAMECONTROLLER_KO()
++:GAMECONTROLLER_MOD()
++{
++	gametype = "K.O.";
++	game_flags = GAMEFLAG_TEAMS;
++	config.sv_ko_mod = 1;
++	config.sv_ball_mod = 0;
++	config.sv_tournament_mode = 1;
++}
++
++void GAMECONTROLLER_KO::tick()
++{
++	if(game_over_tick != -1)
++	{
++		// game over.. wait for restart
++		if(server_tick() > game_over_tick+server_tickspeed()*10)
++		{
++			int next_player = -1;
++			int player[2];
++			player[0] = -1;
++			player[1] = -1;
++			for(int i = 0; i < MAX_CLIENTS; i++)
++			{
++				if(game.players[i])
++				{
++					if(game.players[i]->queue >= 0)
++					{
++						if(next_player == -1)
++						{
++							next_player = i;
++						}
++						else if(game.players[i]->queue < game.players[next_player]->queue)
++						{
++							next_player = i;
++						}
++					}
++					if(game.players[i]->team >= 0)
++					{
++						player[game.players[i]->team] = i;
++					}
++				}
++			}
++			if(next_player != -1)
++			{
++				if((teamscore[0] > teamscore[1] && player[0] != -1) || player[1] == -1)
++				{
++					if(player[1] != -1)
++						game.players[player[1]]->set_team(-1);
++					game.players[next_player]->set_team(1);
++					game.players[next_player]->queue = -2;
++				}
++				else
++				{
++					if(player[0] != -1)
++						game.players[player[0]]->set_team(-1);
++					game.players[next_player]->set_team(0);
++					game.players[next_player]->queue = -2;
++				}
++				startround();
++				return;
++			}
++			else if(player[0] != -1 || player[1] != -1)
++			{
++				char buf[512];
++				if((teamscore[0] > teamscore[1] && player[0] != -1) || (player[0] != -1 && player[1] == -1))
++					strcpy(buf, server_clientname(player[0]));
++				else if(player[1] != -1)
++					strcpy(buf, server_clientname(player[1]));
++				strcat(buf, " is the best player on this server.");
++				if(player[0] != -1)
++					game.players[player[0]]->set_team(-1);
++				if(player[1] != -1)
++					game.players[player[1]]->set_team(-1);
++				for(int i = 0; i < MAX_CLIENTS; i++)
++				{
++					if(game.players[i])
++					{
++						game.players[i]->queue = -1;
++						game.players[i]->last_input = server_tick();
++					}
++				}
++				game.send_broadcast(buf, -1);
++				game.send_chat(-1, -2, buf);
++			}
++			cyclemap();
++			startround();
++		}
++	}
++	do_team_score_wincheck();
++	GAMECONTROLLER_MOD::tick();
++}
++
++int GAMECONTROLLER_KO::on_character_death(class CHARACTER *victim, class PLAYER *killer, int weapon)
++{
++	GAMECONTROLLER_MOD::on_character_death(victim, killer, weapon);
++	
++	if(weapon >= 0)
++	{
++		// do team scoring
++		if((killer == victim->player && config.sv_suicide_score) || killer->team == victim->player->team)
++			teamscore[killer->team&1]--; // klant arschel
++		else
++			teamscore[killer->team&1]++; // good shit
++	}
++	return 0;
++}
+diff -Naur teeworlds-0.5.2-src/src/game/server/gamemodes/ko.hpp modpack/src/game/server/gamemodes/ko.hpp
+--- teeworlds-0.5.2-src/src/game/server/gamemodes/ko.hpp	1970-01-01 01:00:00.000000000 +0100
++++ modpack/src/game/server/gamemodes/ko.hpp	2010-05-25 20:36:35.000000000 +0200
+@@ -0,0 +1,10 @@
++#include <game/server/gamemodes/mod.hpp>
++
++class GAMECONTROLLER_KO : public GAMECONTROLLER_MOD
++{
++public:
++	GAMECONTROLLER_KO();
++	virtual int on_character_death(class CHARACTER *victim, class PLAYER *killer, int weapon);
++	void tick();
++};
++
+diff -Naur teeworlds-0.5.2-src/src/game/server/gamemodes/mod.cpp modpack/src/game/server/gamemodes/mod.cpp
+--- teeworlds-0.5.2-src/src/game/server/gamemodes/mod.cpp	2009-10-26 19:04:31.000000000 +0100
++++ modpack/src/game/server/gamemodes/mod.cpp	2010-05-25 20:36:35.000000000 +0200
+@@ -1,20 +1,161 @@
+-/* copyright (c) 2007 magnus auvinen, see licence.txt for more info */
+-#include "mod.hpp"
+-
+-GAMECONTROLLER_MOD::GAMECONTROLLER_MOD()
+-{
+-	// Exchange this to a string that identifies your game mode.
+-	// DM, TDM and CTF are reserved for teeworlds original modes.
+-	gametype = "MOD";
+-	
+-	//game_flags = GAMEFLAG_TEAMS; // GAMEFLAG_TEAMS makes it a two-team gamemode
+-}
+-
+-void GAMECONTROLLER_MOD::tick()
+-{
+-	// this is the main part of the gamemode, this function is run every tick
+-	do_player_score_wincheck(); // checks for winners, no teams version
+-	//do_team_score_wincheck(); // checks for winners, two teams version
+-	
+-	GAMECONTROLLER::tick();
+-}
++#include <string.h>
++#include <engine/e_server_interface.h>
++#include <engine/e_config.h>
++#include <game/server/entities/character.hpp>
++#include <game/server/gamecontext.hpp>
++#include <game/server/player.hpp>
++#include "mod.hpp"
++
++GAMECONTROLLER_MOD::GAMECONTROLLER_MOD()
++{
++	mod = 1;
++}
++
++void GAMECONTROLLER_MOD::on_character_spawn(class CHARACTER *chr)
++{
++	if(config.sv_start_hammer)
++	{
++		chr->active_weapon = WEAPON_HAMMER;
++		chr->last_weapon = WEAPON_HAMMER;
++	}
++	else if(config.sv_start_pistol)
++	{
++		chr->active_weapon = WEAPON_GUN;
++		chr->last_weapon = WEAPON_GUN;
++	}
++	else if(config.sv_start_shotgun)
++	{
++		chr->active_weapon = WEAPON_SHOTGUN;
++		chr->last_weapon = WEAPON_SHOTGUN;
++	}
++	else if(config.sv_start_grenade)
++	{
++		chr->active_weapon = WEAPON_GRENADE;
++		chr->last_weapon = WEAPON_GRENADE;
++	}
++	else if(config.sv_start_rifle)
++	{
++		chr->active_weapon = WEAPON_RIFLE;
++		chr->last_weapon = WEAPON_RIFLE;
++	}
++	else if(config.sv_start_ninja)
++	{
++		chr->active_weapon = WEAPON_NINJA;
++		chr->last_weapon = WEAPON_NINJA;
++	}
++	else
++	{
++		chr->active_weapon = WEAPON_HAMMER;
++		chr->last_weapon = WEAPON_HAMMER;
++	}
++	
++	chr->weapons[WEAPON_HAMMER].got = config.sv_start_hammer ? 1 : 0;
++	chr->weapons[WEAPON_HAMMER].ammo = config.sv_start_hammer ? -1 : 0;
++	chr->weapons[WEAPON_GUN].got = config.sv_start_pistol ? 1 : 0;
++	chr->weapons[WEAPON_GUN].ammo = config.sv_start_pistol;
++	data->weapons.id[WEAPON_GUN].ammoregentime = config.sv_pistol_regen;
++	chr->weapons[WEAPON_SHOTGUN].got = config.sv_start_shotgun ? 1 : 0;
++	chr->weapons[WEAPON_SHOTGUN].ammo = config.sv_start_shotgun;
++	data->weapons.id[WEAPON_SHOTGUN].ammoregentime = config.sv_shotgun_regen;
++	chr->weapons[WEAPON_GRENADE].got = config.sv_start_grenade ? 1 : 0;
++	chr->weapons[WEAPON_GRENADE].ammo = config.sv_start_grenade;
++	data->weapons.id[WEAPON_GRENADE].ammoregentime = config.sv_grenade_regen;
++	chr->weapons[WEAPON_RIFLE].got = config.sv_start_rifle ? 1 : 0;
++	chr->weapons[WEAPON_RIFLE].ammo = config.sv_start_rifle;
++	data->weapons.id[WEAPON_RIFLE].ammoregentime = config.sv_rifle_regen;
++	if(config.sv_start_ninja)
++	{
++		chr->active_weapon = WEAPON_NINJA;
++		chr->last_weapon = WEAPON_NINJA;
++		chr->weapons[WEAPON_NINJA].got = 1;
++		chr->weapons[WEAPON_NINJA].ammo = -1;
++		chr->ninja.activationtick = server_tick();
++	}
++	else
++	{
++		chr->weapons[WEAPON_NINJA].got = 0;
++		chr->weapons[WEAPON_NINJA].ammo = 0;
++	}
++	chr->health = config.sv_start_health;
++	chr->armor = config.sv_start_armor;
++	chr->fire_ball_tick = 0;
++	chr->partly_dead = 0;
++	chr->health_regen = 0;
++	chr->armor_regen = 0;
++}
++
++int GAMECONTROLLER_MOD::on_character_death(class CHARACTER *victim, class PLAYER *killer, int weaponid)
++{
++	if(victim)
++		victim->player->respawn_tick = server_tick() + (config.sv_spawn_delay*server_tickspeed())/1000;
++	// do scoreing
++	if(!killer)
++		return 0;
++	if(killer == victim->player)
++	{
++		if(!config.sv_suicide_score)
++			return 0;
++		victim->player->score--; // suicide
++	}
++	else
++	{
++		if(is_teamplay() && victim->team == killer->team)
++			killer->score--; // teamkill
++		else if(config.sv_kill_score)
++			killer->score++; // normal kill
++	}
++	return 0;
++}
++
++void GAMECONTROLLER_MOD::endround()
++{
++	if(config.sv_generate_pro_pw)
++	{
++		int players_team[2];
++		players_team[0] = 0;
++		players_team[1] = 0;
++		for(int i = 0; i < MAX_CLIENTS; i++)
++		{
++			if(!game.players[i] || game.players[i]->team < 0)
++				continue;
++			players_team[game.players[i]->team]++;
++		}
++		if(players_team[0] && players_team[1] &&
++			teamscore[0] > 4 && teamscore[1] > 4 &&
++			abs(players_team[0] - players_team[1]) < 2 &&
++			(float)teamscore[0]/(float)teamscore[1] > 0.7 && (float)teamscore[1]/(float)teamscore[0] > 0.7)
++		{
++			for(int i = 0; i < MAX_CLIENTS; i++)
++			{
++				if(!game.players[i] || game.players[i]->team == -1 || game.players[i]->score < 4)
++					continue;
++				if(game.players[i] &&
++					(float)game.players[i]->score/((float)teamscore[game.players[i]->team]/(float)players_team[game.players[i]->team]) > 1.0)
++				{
++					char pw[9];
++					server_generate_pw(i, pw);
++					game.send_chat_target(i, config.sv_pre_password_msg);
++					game.send_chat_target(i, pw);
++				}
++			}
++		}
++	}
++	GAMECONTROLLER::endround();
++}
++
++
++void GAMECONTROLLER_MOD::do_team_score_wincheck()
++{
++	if(game_over_tick == -1 && !warmup)
++	{
++		// check score win condition
++		if((config.sv_scorelimit > 0 && (teamscore[0] >= config.sv_scorelimit || teamscore[1] >= config.sv_scorelimit)) ||
++			(config.sv_timelimit > 0 && (server_tick()-round_start_tick) >= config.sv_timelimit*server_tickspeed()*60))
++		{
++			if(teamscore[0] > teamscore[1]+config.sv_diff_score || teamscore[0]+config.sv_diff_score < teamscore[1])
++				endround();
++			else
++				sudden_death = 1;
++		}
++	}
++}
+diff -Naur teeworlds-0.5.2-src/src/game/server/gamemodes/mod.hpp modpack/src/game/server/gamemodes/mod.hpp
+--- teeworlds-0.5.2-src/src/game/server/gamemodes/mod.hpp	2009-10-26 19:04:31.000000000 +0100
++++ modpack/src/game/server/gamemodes/mod.hpp	2010-05-25 20:36:35.000000000 +0200
+@@ -1,13 +1,16 @@
+-/* copyright (c) 2007 magnus auvinen, see licence.txt for more info */
+-
+-#include <game/server/gamecontroller.hpp>
+-
+-// you can subclass GAMECONTROLLER_CTF, GAMECONTROLLER_TDM etc if you want
+-// todo a modification with their base as well.
+-class GAMECONTROLLER_MOD : public GAMECONTROLLER
+-{
+-public:
+-	GAMECONTROLLER_MOD();
+-	virtual void tick();
+-	// add more virtual functions here if you wish
+-};
++#ifndef GAMECONTROLLER_MODS
++#define GAMECONTROLLER_MODS
++
++#include <game/server/gamecontroller.hpp>
++
++class GAMECONTROLLER_MOD : public GAMECONTROLLER
++{
++public:
++	GAMECONTROLLER_MOD();
++	virtual int on_character_death(class CHARACTER *victim, class PLAYER *killer, int weapon);
++	virtual void on_character_spawn(class CHARACTER *chr);
++	virtual void do_team_score_wincheck();
++	void endround();
++};
++
++#endif
+diff -Naur teeworlds-0.5.2-src/src/game/server/gamemodes/tdmmod.cpp modpack/src/game/server/gamemodes/tdmmod.cpp
+--- teeworlds-0.5.2-src/src/game/server/gamemodes/tdmmod.cpp	1970-01-01 01:00:00.000000000 +0100
++++ modpack/src/game/server/gamemodes/tdmmod.cpp	2010-05-25 20:49:43.000000000 +0200
+@@ -0,0 +1,33 @@
++#include <engine/e_server_interface.h>
++#include <game/server/entities/character.hpp>
++#include <game/server/player.hpp>
++#include <engine/e_config.h>
++#include "tdmmod.hpp"
++
++GAMECONTROLLER_TDMMOD::GAMECONTROLLER_TDMMOD()
++:GAMECONTROLLER_MOD()
++{
++	gametype = "mTDM";
++	game_flags = GAMEFLAG_TEAMS;
++}
++
++int GAMECONTROLLER_TDMMOD::on_character_death(class CHARACTER *victim, class PLAYER *killer, int weapon)
++{
++	GAMECONTROLLER_MOD::on_character_death(victim, killer, weapon);
++	
++	if(weapon >= 0)
++	{
++		// do team scoring
++		if(killer == victim->player || killer->team == victim->player->team)
++			teamscore[killer->team&1]--; // klant arschel
++		else if(config.sv_kill_score)
++			teamscore[killer->team&1]++; // good shit
++	}
++	return 0;
++}
++
++void GAMECONTROLLER_TDMMOD::tick()
++{
++	do_team_score_wincheck();
++	GAMECONTROLLER_MOD::tick();
++}
+diff -Naur teeworlds-0.5.2-src/src/game/server/gamemodes/tdmmod.hpp modpack/src/game/server/gamemodes/tdmmod.hpp
+--- teeworlds-0.5.2-src/src/game/server/gamemodes/tdmmod.hpp	1970-01-01 01:00:00.000000000 +0100
++++ modpack/src/game/server/gamemodes/tdmmod.hpp	2010-05-25 20:36:35.000000000 +0200
+@@ -0,0 +1,10 @@
++#include <game/server/gamemodes/mod.hpp>
++
++class GAMECONTROLLER_TDMMOD : public GAMECONTROLLER_MOD
++{
++public:
++	GAMECONTROLLER_TDMMOD();
++	
++	int on_character_death(class CHARACTER *victim, class PLAYER *killer, int weapon);
++	virtual void tick();
++};
+diff -Naur teeworlds-0.5.2-src/src/game/server/gameworld.cpp modpack/src/game/server/gameworld.cpp
+--- teeworlds-0.5.2-src/src/game/server/gameworld.cpp	2009-10-26 19:04:31.000000000 +0100
++++ modpack/src/game/server/gameworld.cpp	2010-05-25 20:36:35.000000000 +0200
+@@ -138,6 +138,21 @@
+ 	}
+ }
+ 
++void GAMEWORLD::remove_projectiles()
++{
++        ENTITY *ent = first_entity;
++        while(ent)
++        {
++                ENTITY *next = ent->next_entity;
++                if(ent->objtype == NETOBJTYPE_PROJECTILE)
++                {
++                        remove_entity(ent);
++                        ent->destroy();
++                }
++                ent = next;
++        }
++}
++
+ void GAMEWORLD::tick()
+ {
+ 	if(reset_requested)
+diff -Naur teeworlds-0.5.2-src/src/game/server/gameworld.hpp modpack/src/game/server/gameworld.hpp
+--- teeworlds-0.5.2-src/src/game/server/gameworld.hpp	2009-10-26 19:04:31.000000000 +0100
++++ modpack/src/game/server/gameworld.hpp	2010-05-25 20:36:35.000000000 +0200
+@@ -14,7 +14,7 @@
+ class GAMEWORLD
+ {
+ 	void reset();
+-	void remove_entities();
++	
+ 
+ 	enum
+ 	{
+@@ -26,6 +26,8 @@
+ 	ENTITY *first_entity_types[NUM_ENT_TYPES];
+ 
+ public:
++	void remove_entities();
++	void remove_projectiles();
+ 	bool reset_requested;
+ 	bool paused;
+ 	WORLD_CORE core;
+diff -Naur teeworlds-0.5.2-src/src/game/server/hooks.cpp modpack/src/game/server/hooks.cpp
+--- teeworlds-0.5.2-src/src/game/server/hooks.cpp	2009-10-26 19:04:31.000000000 +0100
++++ modpack/src/game/server/hooks.cpp	2010-05-25 20:44:21.000000000 +0200
+@@ -21,7 +21,11 @@
+ #include "gamemodes/dm.hpp"
+ #include "gamemodes/tdm.hpp"
+ #include "gamemodes/ctf.hpp"
+-#include "gamemodes/mod.hpp"
++#include "gamemodes/ball.hpp"
++#include "gamemodes/dmmod.hpp"
++#include "gamemodes/tdmmod.hpp"
++#include "gamemodes/ctfmod.hpp"
++#include "gamemodes/ko.hpp"
+ 
+ TUNING_PARAMS tuning;
+ 
+@@ -98,6 +102,51 @@
+ 		}
+ 	}
+ #endif
++	for(int i = 0; i < MAX_CLIENTS && server_tick()%(config.sv_msg_frame_time * server_tickspeed()) == 0; i++)
++		if(game.players[i] && --game.players[i]->messages < 0)
++			game.players[i]->messages = 0;
++	if(strlen(config.sv_min_msg) > 0 && config.sv_msg_intervall && server_tick()%(config.sv_msg_intervall * 60 * server_tickspeed()) == 0)
++		game.send_chat(-1,-2,config.sv_min_msg);
++	if(server_tick()%100 || !(config.sv_kick_idle || config.sv_max_idle))
++		return;
++	int players_online = 0;
++	int players_ingame = 0;
++	int idler = -1;
++	for(int i = 0; i < config.sv_max_clients; i++)
++	{
++		if(game.players[i] && game.players[i]->client_id >= 0)
++		{
++			players_online++;
++			if(game.players[i]->team >= 0)
++				players_ingame++;
++			if(config.sv_max_idle && server_tick() - game.players[i]->last_input >= config.sv_max_idle * server_tickspeed())
++			{
++				if(idler == -1 && ((config.sv_ko_mod && game.players[i]->queue == -1) || !config.sv_ko_mod))
++					idler = i;
++				if(game.players[i]->team != -1)
++				{
++					game.players[i]->set_team(-1);
++					(void) game.controller->check_team_balance();
++					if(config.sv_ko_mod)
++					{
++						game.players[i]->queue = -2;
++						game.controller->endround();
++					}
++				}
++			}
++			if(game.players[i]->joined && game.players[i]->joined + server_tickspeed()*5 <= server_tick())
++			{
++				game.send_chat_target(i, "Please use .info to get help and information");
++				game.send_broadcast("Please use .info to get help and information", i);
++				game.players[i]->joined = 0;
++			}
++		}
++	}
++	if(config.sv_kick_idle && players_ingame < config.sv_max_clients - config.sv_spectator_slots && players_online >= config.sv_max_clients - config.sv_reserved_slots && idler != -1)
++	{
++		game.players[idler]->last_input = server_tick();
++		server_kick(idler, "You were away and the server was full... so you were automatically kicked");
++	}
+ }
+ 
+ void mods_snap(int client_id)
+@@ -117,6 +166,12 @@
+ 	game.send_chat(-1, GAMECONTEXT::CHAT_ALL, buf); 
+ 
+ 	dbg_msg("game", "team_join player='%d:%s' team=%d", client_id, server_clientname(client_id), game.players[client_id]->team);
++	game.players[client_id]->messages = 0;
++	game.players[client_id]->muted = 0;
++	game.players[client_id]->last_input = server_tick();
++	game.players[client_id]->queue = -1;
++	game.players[client_id]->voted = false;
++	game.players[client_id]->joined = server_tick();
+ }
+ 
+ void mods_connected(int client_id)
+@@ -142,12 +197,24 @@
+ 
+ void mods_client_drop(int client_id)
+ {
++	if(config.sv_goalkeeper && game.players[client_id]->team >= 0)
++	{
++		if(game.players[client_id]->goalkeeper)
++		{
++			game.players[client_id]->goalkeeper = 0;
++			game.controller->goalkeeper[game.players[client_id]->team]--;
++		}
++	}
++	game.players[client_id]->queue = -2;
++	bool endround = (game.players[client_id]->team >= 0 && config.sv_ko_mod) ? true:false;
+ 	game.abort_vote_kick_on_disconnect(client_id);
+ 	game.players[client_id]->on_disconnect();
+ 	delete game.players[client_id];
+ 	game.players[client_id] = 0;
+ 	
+ 	(void) game.controller->check_team_balance();
++	if(endround)
++		game.controller->endround();
+ }
+ 
+ /*static bool is_separator(char c) { return c == ';' || c == ' ' || c == ',' || c == '\t'; }
+@@ -170,6 +237,27 @@
+ 	return 0;
+ }*/
+ 
++int add_spam_msg(int client_id)
++{
++	if(game.players[client_id]->muted > server_tick())
++	{
++		game.send_broadcast("You are still muted!", client_id);
++		return -1;
++	}
++	game.players[client_id]->muted = 0;
++	if(++game.players[client_id]->messages > config.sv_max_msgs)
++	{
++		char buf[512];
++		strcpy(buf, server_clientname(client_id));
++		strcat(buf, " is muted now because of spamming.");
++		game.send_chat(-1,-2,buf);
++		game.send_broadcast("You are muted because of spamming", client_id);
++		dbg_msg("spam","muting now");
++		game.players[client_id]->muted = server_tick() + server_tickspeed()*config.sv_msg_mute_time;
++	}
++	return 0;
++}
++
+ void mods_message(int msgtype, int client_id)
+ {
+ 	void *rawmsg = netmsg_secure_unpack(msgtype);
+@@ -183,6 +271,8 @@
+ 	
+ 	if(msgtype == NETMSGTYPE_CL_SAY)
+ 	{
++		if(add_spam_msg(client_id) == -1)
++			return;
+ 		NETMSG_CL_SAY *msg = (NETMSG_CL_SAY *)rawmsg;
+ 		int team = msg->team;
+ 		if(team)
+@@ -194,6 +284,109 @@
+ 			return;
+ 		
+ 		p->last_chat = time_get();
++		p->last_input = server_tick();
++		if(config.sv_cwscore && strcmp("/cwscore",msg->message) == 0)
++		{
++			char buf[512];
++			str_format(buf,sizeof(buf), "Clanwar score: Red: %i Blue: %i", game.controller->cwscore[0], game.controller->cwscore[1]);
++			game.send_chat_target(p->client_id, buf);
++			return;
++		}
++		if(config.sv_handle_mapvotes && (strcmp("/++",msg->message) == 0 || strcmp("/--", msg->message) == 0))
++		{
++			if(game.players[client_id]->voted)
++			{
++				game.send_broadcast("You already voted, ignoring vote", client_id);
++			}
++			else
++			{
++				game.players[client_id]->voted = true;
++				dbg_msg("game", "map-voting %s", msg->message);
++				game.send_broadcast("You voted for the map, thank you", client_id);
++			}
++			return;
++		}
++		if(config.sv_goalkeeper && strcmp(msg->message, "/goalkeeper") == 0 && p->team >= 0)
++		{
++			if(!p->goalkeeper && game.controller->goalkeeper[p->team] < config.sv_goalkeeper)
++			{
++				char buf[300];
++				strcpy(buf,server_clientname(p->client_id));
++				p->goalkeeper = 1;
++				game.controller->goalkeeper[p->team]++;
++				strcat(buf, " is goalkeeper now");
++				game.send_chat(-1,-1,buf);
++				game.send_chat(-1,p->team,buf);
++				p->kill_character(-1);
++				return;
++			}
++			else if(p->goalkeeper)
++			{
++				game.controller->goalkeeper[p->team]--;
++				char buf[300];
++				strcpy(buf,server_clientname(p->client_id));
++				p->goalkeeper = 0;
++				strcat(buf, " is not a goalkeeper anymore");
++				game.send_chat(-1,-1,buf);
++				game.send_chat(-1,p->team,buf);
++				p->kill_character(-1);
++				return;
++			}
++			else
++			{
++				game.send_broadcast("No more goalkeepers", p->client_id);
++				return;
++			}
++		}
++		if(config.sv_ball_mod && strcmp(msg->message, "/ball") == 0)
++		{
++			p->ballposition = !p->ballposition;
++			return;
++		}
++		if(strcmp(msg->message, ".info") == 0)
++		{
++			game.send_chat_target(p->client_id, "MOD from scosu with support from Rajh. Commands:");
++			game.send_chat_target(p->client_id, ".modinfo (Help for the MOD)");
++			if(config.sv_ball_mod)
++				game.send_chat_target(p->client_id, "/ball (Enables/Disables the displaying of the ball position)");
++			if(config.sv_goalkeeper)
++				game.send_chat_target(p->client_id, "/goalkeeper (You become goalkeeper for your team)");
++			if(config.sv_handle_mapvotes)
++			{
++				game.send_chat_target(p->client_id, "/++ (You vote positive for the map)");
++				game.send_chat_target(p->client_id, "/-- (You vote negative for the map)");
++			}
++			if(config.sv_cwscore)
++				game.send_chat_target(p->client_id, "/cwscore (Shows you the current scores of both teams)");
++			return;
++		}
++		if(strcmp(msg->message, ".modinfo") == 0)
++		{
++			if(config.sv_ball_mod)
++			{
++				game.send_chat_target(p->client_id, "In this MOD you have to take the ball (grenade) and shoot it into the goal.");
++				game.send_chat_target(p->client_id, "Points:");
++				game.send_chat_target(p->client_id, "Goal with a pass: Goaler: 2 Passer: 1 Team: 3");
++				game.send_chat_target(p->client_id, "Goal without pass: Goaler: 2 Team: 2");
++				game.send_chat_target(p->client_id, "MOD from scosu with support from Rajh. You can download it at http://modpack.scosu.de");
++			}
++			else if(config.sv_ko_mod)
++			{
++				game.send_chat_target(p->client_id, "In this MOD every player playes at least one time. In the end there is a winner through something like a knockout-tournament. To join the game, you have to join one of the teams. If you are the next one in the queue, you automatically join one of the teams and the round begins.");
++				game.send_chat_target(p->client_id, "MOD from scosu with support from Rajh. You can download it at http://modpack.scosu.de");
++			}
++			else if(game.controller->mod)
++			{
++				game.send_chat_target(p->client_id, "It's a MOD. But no specified one. so just try out or check server info for help.");
++				game.send_chat_target(p->client_id, "MOD from scosu with support from Rajh. You can download it at http://modpack.scosu.de");
++			}
++			else
++			{
++				game.send_chat_target(p->client_id, "This server is running a normal game. It doesn't use a modified gameplay only some things for a better server behaviour.");
++				game.send_chat_target(p->client_id, "MOD from scosu with support from Rajh. You can download it at http://modpack.scosu.de");
++			}
++			return;
++		}
+ 		
+ 		game.send_chat(client_id, team, msg->message);
+ 	}
+@@ -257,7 +450,7 @@
+ 				return;
+ 			}
+ 			
+-			str_format(chatmsg, sizeof(chatmsg), "Vote called to kick '%s'", server_clientname(kick_id));
++			str_format(chatmsg, sizeof(chatmsg), "%s called a vote to kick '%s'", server_clientname(client_id), server_clientname(kick_id));
+ 			str_format(desc, sizeof(desc), "Kick '%s'", server_clientname(kick_id));
+ 			str_format(cmd, sizeof(cmd), "kick %d", kick_id);
+ 			if (!config.sv_vote_kick_bantime)
+@@ -290,11 +483,76 @@
+ 	}
+ 	else if (msgtype == NETMSGTYPE_CL_SETTEAM && !game.world.paused)
+ 	{
++		if(add_spam_msg(client_id) == -1)
++			return;
+ 		NETMSG_CL_SETTEAM *msg = (NETMSG_CL_SETTEAM *)rawmsg;
+ 		
+ 		if(p->team == msg->team || (config.sv_spamprotection && p->last_setteam+time_freq()*3 > time_get()))
+ 			return;
+-
++		p->last_input = server_tick();
++		if(config.sv_ko_mod)
++		{
++			if(game.players[client_id]->queue >= 0)
++			{
++				game.send_broadcast("You are already in waiting-queue... just wait", client_id);
++				return;
++			}
++			if(game.players[client_id]->team >= 0 && msg->team != -1)
++			{
++				game.send_broadcast("You are playing, you can't change team now", client_id);
++				return;
++			}
++			else if(game.players[client_id]->team >= 0)
++			{
++				p->set_team(-1);
++				p->queue = -2;
++				game.controller->endround();
++				return;
++			}
++			if(game.players[client_id]->queue == -2)
++			{
++				game.send_broadcast("You played already. Wait for the next round.", client_id);
++				return;
++			}
++			int player[2];
++			player[0] = -1;
++			player[1] = -1;
++			int max_queue = -1;
++			for(int i = 0; i < MAX_CLIENTS; i++)
++			{
++				if(game.players[i])
++				{
++					if(game.players[i]->team >= 0)
++						player[game.players[i]->team] = i;
++					if(game.players[i]->queue > max_queue)
++						max_queue = game.players[i]->queue;
++				}
++			}
++			if(max_queue != -1)
++			{
++				game.players[client_id]->queue = max_queue + 1;
++			}
++			else
++			{
++				game.players[client_id]->queue = -2;
++				if((player[0] != -1 && player[1] == -1) || (player[1] != -1 && player[0] == -1))
++				{
++					if(player[0] == -1)
++						game.players[client_id]->set_team(0);
++					else
++						game.players[client_id]->set_team(1);
++					game.controller->startround();
++					game.send_broadcast("The game starts now", -1);
++					return;
++				}
++				else if(player[0] != -1 && player[1] != -1)
++				{
++					game.players[client_id]->queue = 0;
++					game.send_broadcast("You are in the waiting-queue now", client_id);
++					return;
++				}
++			}
++		}
+ 		// Switch team on given client and kill/respawn him
+ 		if(game.controller->can_join_team(msg->team, client_id))
+ 		{
+@@ -316,6 +574,8 @@
+ 	}
+ 	else if (msgtype == NETMSGTYPE_CL_CHANGEINFO || msgtype == NETMSGTYPE_CL_STARTINFO)
+ 	{
++		if(add_spam_msg(client_id) == -1)
++			return;
+ 		NETMSG_CL_CHANGEINFO *msg = (NETMSG_CL_CHANGEINFO *)rawmsg;
+ 		
+ 		if(config.sv_spamprotection && p->last_changeinfo+time_freq()*5 > time_get())
+@@ -380,6 +640,8 @@
+ 	}
+ 	else if (msgtype == NETMSGTYPE_CL_EMOTICON && !game.world.paused)
+ 	{
++		if(add_spam_msg(client_id) == -1)
++			return;
+ 		NETMSG_CL_EMOTICON *msg = (NETMSG_CL_EMOTICON *)rawmsg;
+ 		
+ 		if(config.sv_spamprotection && p->last_emote+time_freq()*3 > time_get())
+@@ -391,12 +653,58 @@
+ 	}
+ 	else if (msgtype == NETMSGTYPE_CL_KILL && !game.world.paused)
+ 	{
+-		if(p->last_kill+time_freq()*3 > time_get())
++		p->last_input = server_tick();
++		if(p->last_kill+time_freq()*3 > time_get() || p->get_character() == NULL)
+ 			return;
+ 		
+ 		p->last_kill = time_get();
+-		p->kill_character(WEAPON_SELF);
+ 		p->respawn_tick = server_tick()+server_tickspeed()*3;
++		p->kill_character(WEAPON_SELF);
++	}
++	for(int i = 0; i < MAX_CLIENTS && server_tick()%(config.sv_msg_frame_time * server_tickspeed()) == 0; i++)
++		if(game.players[i] && --game.players[i]->messages < 0)
++			game.players[i]->messages = 0;
++	if(strlen(config.sv_min_msg) > 0 && config.sv_msg_intervall && server_tick()%(config.sv_msg_intervall * 60 * server_tickspeed()) == 0)
++		game.send_chat(-1,-2,config.sv_min_msg);
++	if(server_tick()%100 || !(config.sv_kick_idle || config.sv_max_idle))
++		return;
++	int players_online = 0;
++	int players_ingame = 0;
++	int idler = -1;
++	for(int i = 0; i < config.sv_max_clients; i++)
++	{
++		if(game.players[i] && game.players[i]->client_id >= 0)
++		{
++			players_online++;
++			if(game.players[i]->team >= 0)
++				players_ingame++;
++			if(config.sv_max_idle && server_tick() - game.players[i]->last_input >= config.sv_max_idle * server_tickspeed())
++			{
++				if(idler == -1 && ((config.sv_ko_mod && game.players[i]->queue == -1) || !config.sv_ko_mod))
++					idler = i;
++				if(game.players[i]->team != -1)
++				{
++					game.players[i]->set_team(-1);
++					(void) game.controller->check_team_balance();
++					if(config.sv_ko_mod)
++					{
++						game.players[i]->queue = -2;
++						game.controller->endround();
++					}
++				}
++			}
++			if(game.players[i]->joined && game.players[i]->joined + server_tickspeed()*5 <= server_tick())
++			{
++				game.send_chat_target(i, "Please use .info to get help and information");
++				game.send_broadcast("Please use .info to get help and information", i);
++				game.players[i]->joined = 0;
++			}
++		}
++	}
++	if(config.sv_kick_idle && players_ingame < config.sv_max_clients - config.sv_spectator_slots && players_online >= config.sv_max_clients - config.sv_reserved_slots && idler != -1)
++	{
++		game.players[idler]->last_input = server_tick();
++		server_kick(idler, "You were away and the server was full... so you were automatically kicked");
+ 	}
+ }
+ 
+@@ -499,6 +807,114 @@
+ 	dbg_msg("server", "forcing vote %s", console_arg_string(result, 0));
+ }
+ 
++static void con_respawn_ball(void *result, void *user_data)
++{
++	game.world.reset_requested = true;
++}
++
++static void con_mute(void *result, void *user_data)
++{
++	if(console_arg_int(result, 0) < 0 || console_arg_int(result, 0) >= MAX_CLIENTS)
++		return;
++	char buf[512];
++	strcpy(buf, server_clientname(console_arg_int(result, 0)));
++	strcat(buf, " is muted now.");
++	game.send_chat(-1,-2,buf);
++	game.send_broadcast("You are muted", console_arg_int(result, 0));
++	dbg_msg("spam","muting now");
++	game.players[console_arg_int(result, 0)]->muted = server_tick() + server_tickspeed()*console_arg_int(result, 1);
++}
++
++static void con_unmute(void *result, void *user_data)
++{
++	if(console_arg_int(result, 0) < 0 || console_arg_int(result, 0) >= MAX_CLIENTS)
++		return;
++	game.send_broadcast("You can speak again", console_arg_int(result, 0));
++	dbg_msg("spam","unmuting now");
++	game.players[console_arg_int(result, 0)]->muted = 0;
++	game.players[console_arg_int(result, 0)]->messages = 0;
++}
++
++static void con_gen_pw(void *result, void *user_data)
++{
++	if(console_arg_int(result, 0) < 0 || console_arg_int(result, 0) >= MAX_CLIENTS)
++		return;
++	char pw[9];
++	server_generate_pw(console_arg_int(result, 0), pw);
++	game.send_chat_target(console_arg_int(result, 0), pw);
++}
++
++static void con_set_score(void *result, void *user_data)
++{
++	if(console_arg_int(result, 0) < 0 || console_arg_int(result, 0) >= MAX_CLIENTS || !game.players[console_arg_int(result, 0)])
++		return;
++	game.players[console_arg_int(result, 0)]->score = console_arg_int(result, 1);
++	char buf[512];
++	sprintf(buf, "The admin set your score to %d", console_arg_int(result, 1));
++	game.send_broadcast(buf, console_arg_int(result, 0));
++}
++
++static void con_set_teamscore(void *result, void *user_data)
++{
++	if(console_arg_int(result, 0) < 0 || console_arg_int(result, 0) > 1)
++		return;
++	game.controller->teamscore[console_arg_int(result, 0)] = console_arg_int(result, 1);
++	char buf[512];
++	sprintf(buf, "The admin set score of %s team to %d", (console_arg_int(result, 0)?"blue":"red"), console_arg_int(result, 1));
++	game.send_broadcast(buf, console_arg_int(result, 0));
++}
++
++static void con_set_cwscore(void *result, void *user_data)
++{
++	if(console_arg_int(result, 0) < 0 || console_arg_int(result, 0) > 1)
++		return;
++	game.controller->cwscore[console_arg_int(result, 0)] = console_arg_int(result, 1);
++	char buf[512];
++	sprintf(buf, "The admin set cwscore of %s team to %d", (console_arg_int(result, 0)?"blue":"red"), console_arg_int(result, 1));
++	game.send_broadcast(buf, console_arg_int(result, 0));
++}
++
++static void con_reset_cwscore(void *result, void *user_data)
++{
++	game.controller->cwscore[0] = 0;
++	game.controller->cwscore[1] = 0;
++	char buf[512];
++	sprintf(buf, "reset of cwscore");
++	game.send_broadcast(buf, console_arg_int(result, 0));
++}
++
++static void con_kill(void *result, void *user_data)
++{
++	if(console_arg_int(result, 0) < 0 || console_arg_int(result, 0) >= MAX_CLIENTS || !game.players[console_arg_int(result, 0)])
++		return;
++	game.players[console_arg_int(result, 0)]->last_kill = time_get();
++	game.players[console_arg_int(result, 0)]->kill_character(-1); //(client_id, -1);
++	game.players[console_arg_int(result, 0)]->respawn_tick = server_tick()+server_tickspeed()*console_arg_int(result, 1);
++	char buf[512];
++	sprintf(buf, "The admin killed you for %d seconds", console_arg_int(result, 1));
++	game.send_broadcast(buf, console_arg_int(result, 0));
++}
++
++static void con_set_all_spec(void *result, void *user_data)
++{
++	for(int i = 0; i < MAX_CLIENTS; i++)
++	{
++		if(!game.players[i] || game.players[i]->team < 0)
++			continue;
++		game.players[i]->set_team(-1);
++	}
++}
++
++static void con_set_all_kick(void *result, void *user_data)
++{
++	for(int i = 0; i < MAX_CLIENTS; i++)
++	{
++		if(!game.players[i])
++			continue;
++		server_kick(i, console_arg_string(result, 0));
++	}
++}
++
+ void mods_console_init()
+ {
+ 	MACRO_REGISTER_COMMAND("tune", "si", CFGFLAG_SERVER, con_tune_param, 0, "");
+@@ -513,6 +929,20 @@
+ 
+ 	MACRO_REGISTER_COMMAND("addvote", "r", CFGFLAG_SERVER, con_addvote, 0, "");
+ 	MACRO_REGISTER_COMMAND("vote", "r", CFGFLAG_SERVER, con_vote, 0, "");
++	
++	
++	
++	MACRO_REGISTER_COMMAND("reset", "", CFGFLAG_SERVER, con_respawn_ball, 0, "");
++ 	MACRO_REGISTER_COMMAND("mute", "ii", CFGFLAG_SERVER, con_mute, 0, "");
++ 	MACRO_REGISTER_COMMAND("unmute", "i", CFGFLAG_SERVER, con_unmute, 0, "");
++ 	MACRO_REGISTER_COMMAND("gen_pro_pw", "i", CFGFLAG_SERVER, con_gen_pw, 0, "");
++ 	MACRO_REGISTER_COMMAND("set_teamscore", "ii", CFGFLAG_SERVER, con_set_teamscore, 0, "");
++ 	MACRO_REGISTER_COMMAND("set_cwscore", "ii", CFGFLAG_SERVER, con_set_cwscore, 0, "");
++ 	MACRO_REGISTER_COMMAND("set_playerscore", "ii", CFGFLAG_SERVER, con_set_score, 0, "");
++ 	MACRO_REGISTER_COMMAND("kill", "ii", CFGFLAG_SERVER, con_kill, 0, "");
++ 	MACRO_REGISTER_COMMAND("all_spec", "", CFGFLAG_SERVER, con_set_all_spec, 0, "");
++	MACRO_REGISTER_COMMAND("all_kick", "", CFGFLAG_SERVER, con_set_all_kick, 0, "");
++	MACRO_REGISTER_COMMAND("reset_cwscore", "", CFGFLAG_SERVER, con_reset_cwscore, 0, "");
+ }
+ 
+ void mods_init()
+@@ -537,9 +967,20 @@
+ 		game.controller = new GAMECONTROLLER_CTF;
+ 	else if(strcmp(config.sv_gametype, "tdm") == 0)
+ 		game.controller = new GAMECONTROLLER_TDM;
++	else if(strcmp(config.sv_gametype, "ball") == 0)
++		game.controller = new GAMECONTROLLER_BALL;
++	else if(strcmp(config.sv_gametype, "dm-mod") == 0)
++		game.controller = new GAMECONTROLLER_DMMOD;
++	else if(strcmp(config.sv_gametype, "tdm-mod") == 0)
++		game.controller = new GAMECONTROLLER_TDMMOD;
++	else if(strcmp(config.sv_gametype, "ctf-mod") == 0)
++		game.controller = new GAMECONTROLLER_CTFMOD;
++	else if(strcmp(config.sv_gametype, "ko") == 0)
++		game.controller = new GAMECONTROLLER_KO;
+ 	else
+ 		game.controller = new GAMECONTROLLER_DM;
+-
++	game.controller->cwscore[0] = 0;
++	game.controller->cwscore[1] = 0;
+ 	// setup core world
+ 	//for(int i = 0; i < MAX_CLIENTS; i++)
+ 	//	game.players[i].core.world = &game.world.core;
+@@ -565,6 +1006,11 @@
+ 				vec2 pos(x*32.0f+16.0f, y*32.0f+16.0f);
+ 				game.controller->on_entity(index-ENTITY_OFFSET, pos);
+ 			}
++			else if(index == ENTITY_SPAWN_KEEPER_RED || index == ENTITY_SPAWN_KEEPER_BLUE)
++			{
++				vec2 pos(x*32.0f+16.0f, y*32.0f+16.0f);
++				game.controller->on_entity(index, pos);
++			}
+ 		}
+ 	}
+ 
+diff -Naur teeworlds-0.5.2-src/src/game/server/player.cpp modpack/src/game/server/player.cpp
+--- teeworlds-0.5.2-src/src/game/server/player.cpp	2009-10-26 19:04:31.000000000 +0100
++++ modpack/src/game/server/player.cpp	2010-05-25 20:36:35.000000000 +0200
+@@ -1,17 +1,23 @@
+ #include <new>
+ 
+ #include <engine/e_server_interface.h>
+-
++#include <engine/e_config.h>
+ #include "player.hpp"
+ #include "gamecontext.hpp"
++#include <string.h>
++#include <stdio.h>
+ 
+ MACRO_ALLOC_POOL_ID_IMPL(PLAYER, MAX_CLIENTS)
+ 
+ PLAYER::PLAYER(int client_id)
+ {
++	last_input = server_tick();
+ 	respawn_tick = server_tick();
+ 	character = 0;
+ 	this->client_id = client_id;
++	ballposition = false;
++	spawning = false;
++	goalkeeper = 0;
+ }
+ 
+ PLAYER::~PLAYER()
+@@ -45,7 +51,7 @@
+ 		}
+ 	}
+ 	
+-	if(!character && die_tick+server_tickspeed()*3 <= server_tick())
++	if(!character && die_tick+server_tickspeed()*3 <= server_tick() && team >= 0)
+ 		spawning = true;
+ 
+ 	if(character)
+@@ -62,6 +68,52 @@
+ 	}
+ 	else if(spawning && respawn_tick <= server_tick())
+ 		try_respawn();
++	if(server_tick()%server_tickspeed() == 0 && config.sv_ball_mod && ballposition && game.controller->spawning == 0)
++	{
++		char buf[512];
++		if(game.controller->ball.x == 0 && game.controller->ball.y == 0)
++		{
++			strcpy(buf, "Wait a moment for ball respawn");
++		}
++		else if(game.players[client_id])
++		{
++			CHARACTER *tmp;
++			if(tmp = get_character())
++			{
++				if((int)(tmp->core.pos.x/32) == (int)(game.controller->ball.x/32) && (int)(tmp->core.pos.y/32) == (int)(game.controller->ball.y/32))
++				{
++					strcpy(buf,"O");
++				}
++				else if(tmp->core.pos.x > game.controller->ball.x)
++				{
++					if(tmp->core.pos.y > game.controller->ball.y)
++					{
++						sprintf(buf, "< %i\n^ %i", abs((tmp->core.pos.x-game.controller->ball.x)/32), abs((tmp->core.pos.y-game.controller->ball.y)/32));
++					}
++					else
++					{
++					sprintf(buf, "< %i\nv %i", abs((tmp->core.pos.x-game.controller->ball.x)/32), abs((tmp->core.pos.y-game.controller->ball.y)/32));
++					}
++				}
++				else
++				{
++					if(tmp->core.pos.y > game.controller->ball.y)
++					{
++						sprintf(buf, "> %i\n^ %i", abs((tmp->core.pos.x-game.controller->ball.x)/32), abs((tmp->core.pos.y-game.controller->ball.y)/32));
++					}
++					else
++					{
++						sprintf(buf, "> %i\nv %i", abs((tmp->core.pos.x-game.controller->ball.x)/32), abs((tmp->core.pos.y-game.controller->ball.y)/32));
++					}
++				}
++			}
++			else
++			{
++				strcpy(buf, "First you have to respawn");
++			}
++		}
++		game.send_broadcast(buf, client_id);
++	}
+ }
+ 
+ void PLAYER::snap(int snapping_client)
+@@ -155,11 +207,18 @@
+ 	game.send_chat(-1, GAMECONTEXT::CHAT_ALL, buf); 
+ 	
+ 	kill_character(WEAPON_GAME);
++	if(config.sv_goalkeeper && config.sv_ball_mod && goalkeeper)
++	{
++		goalkeeper = 0;
++		game.controller->goalkeeper[team]--;
++	}
+ 	team = new_team;
+-	score = 0;
++	//score = 0;
+ 	dbg_msg("game", "team_join player='%d:%s' team=%d", client_id, server_clientname(client_id), team);
+-	
++
+ 	game.controller->on_player_info_change(game.players[client_id]);
++	if(team == -1)
++		spawning = false;
+ }
+ 
+ void PLAYER::try_respawn()
+diff -Naur teeworlds-0.5.2-src/src/game/server/player.hpp modpack/src/game/server/player.hpp
+--- teeworlds-0.5.2-src/src/game/server/player.hpp	2009-10-26 19:04:31.000000000 +0100
++++ modpack/src/game/server/player.hpp	2010-05-25 20:36:35.000000000 +0200
+@@ -70,6 +70,17 @@
+ 	void on_direct_input(NETOBJ_PLAYER_INPUT *new_input);
+ 	void on_predicted_input(NETOBJ_PLAYER_INPUT *new_input);
+ 	void on_disconnect();
++	
++	int last_shot_time;
++	int get_ball_time;
++	int last_input;
++	int messages;
++	int muted;
++	int queue;
++	bool voted;
++	int joined;
++	bool ballposition;
++	int goalkeeper;
+ };
+ 
+ #endif
+diff -Naur teeworlds-0.5.2-src/src/game/variables.hpp modpack/src/game/variables.hpp
+--- teeworlds-0.5.2-src/src/game/variables.hpp	2009-10-26 19:04:31.000000000 +0100
++++ modpack/src/game/variables.hpp	2010-05-25 20:36:35.000000000 +0200
+@@ -72,3 +72,175 @@
+ 
+ MACRO_CONFIG_INT(dbg_focus, 0, 0, 1, CFGFLAG_CLIENT, "")
+ MACRO_CONFIG_INT(dbg_tuning, 0, 0, 1, CFGFLAG_CLIENT, "")
++
++
++
++
++
++MACRO_CONFIG_INT(sv_ball_mod, 0, 0, 1, CFGFLAG_SERVER, "Is enabled if you choose the ball gametype")
++MACRO_CONFIG_INT(sv_ninja_mod, 0, 0, 1, CFGFLAG_SERVER, "If you have the ninja, you can use it forever")
++MACRO_CONFIG_INT(sv_ko_mod, 0, 0, 1, CFGFLAG_SERVER, "Is enabled if you choose the ko gametype")
++
++
++
++MACRO_CONFIG_INT(sv_hammer_team_att_loss, 0, 0, 10, CFGFLAG_SERVER, "The attacker looses this health, if he attacks a teammate")
++MACRO_CONFIG_INT(sv_hammer_att_loss, 0, 0, 10, CFGFLAG_SERVER, "The attacker looses this health")
++MACRO_CONFIG_INT(sv_hammer_def_loss, 0, 0, 10, CFGFLAG_SERVER, "The victim player looses this armor")
++MACRO_CONFIG_INT(sv_big_hammer_team_att_loss, 0, 0, 10, CFGFLAG_SERVER, "The attacker looses this health, if he attacks a teammate")
++MACRO_CONFIG_INT(sv_big_hammer_att_loss, 0, 0, 10, CFGFLAG_SERVER, "The attacker looses this health")
++MACRO_CONFIG_INT(sv_big_hammer_def_loss, 0, 0, 10, CFGFLAG_SERVER, "The victim player looses this armor")
++MACRO_CONFIG_INT(sv_partly_dead, 0, 0, 10000, CFGFLAG_SERVER, "If the player only has 1hp, the player is partly dead for this value seconds. In this time there is no health/armor regeneration and the player can't hook other players or take the ball")
++MACRO_CONFIG_INT(sv_big_hammer, 0, 0, 10, CFGFLAG_SERVER, "Enables a big hammer. This hammer has a higher range than the normal one and only decreases the armor of the victim")
++MACRO_CONFIG_INT(sv_hook_team_att_decr, 0, 0, 1000, CFGFLAG_SERVER, "The hooker's health is decreased by this value in 10 seconds, when hooking a teammate")
++MACRO_CONFIG_INT(sv_hook_att_decr, 0, 0, 1000, CFGFLAG_SERVER, "The hooker's health is decreased by this value in 10 seconds")
++MACRO_CONFIG_INT(sv_hook_def_decr, 0, 0, 1000, CFGFLAG_SERVER, "The hooked player's armor is decreased by this value in 10 seconds")
++MACRO_CONFIG_INT(sv_hook_def_health_decr, 0, 0, 1000, CFGFLAG_SERVER, "The hooked player's health is decreased by this value in 10 seconds")
++MACRO_CONFIG_INT(sv_health_regen, 0, 0, 1000, CFGFLAG_SERVER, "Health regeneration (this value is the added health in 10 seconds)")
++MACRO_CONFIG_INT(sv_armor_regen, 0, 0, 1000, CFGFLAG_SERVER, "Armor regeneration (this value is the added armor in 10 seconds)")
++
++
++MACRO_CONFIG_INT(sv_hook_teammates, 1, 0, 1, CFGFLAG_SERVER, "Enable the ability to hook teammates")
++
++MACRO_CONFIG_INT(sv_grenade_startspeed, 0, 0, 1000000, CFGFLAG_SERVER, "startspeed of the grenade (the sum of player-speed and normal grenade-speed)")
++
++MACRO_CONFIG_INT(sv_ice_friction, 4, 0, 1000000, CFGFLAG_SERVER, "")
++MACRO_CONFIG_INT(sv_ice_max_speed, 10000, 0, 1000000, CFGFLAG_SERVER, "")
++MACRO_CONFIG_INT(sv_ice_accel, 180, 0, 1000000, CFGFLAG_SERVER, "")
++
++MACRO_CONFIG_INT(sv_spawn_delay, 2000, 0, 100000, CFGFLAG_SERVER, "Spawn delay for players after a kill")
++
++MACRO_CONFIG_INT(sv_msg_intervall, 4, 0, 10000, CFGFLAG_SERVER, "After what time the message sv_min_msg is displayed (minutes).")
++MACRO_CONFIG_STR(sv_min_msg, 512, "", CFGFLAG_SERVER, "A message displayed every sv_msg_intervall minutes in the chat.")
++
++MACRO_CONFIG_INT(sv_msg_frame_time, 4, 0, 10000, CFGFLAG_SERVER, "After this time the server decreases the number of messages a player sent by one. (So it's kind of messages per minute here)")
++MACRO_CONFIG_INT(sv_max_msgs, 5, 0, 10000, CFGFLAG_SERVER, "Maximal messages before muting the player. (So that's something like toleranz to the sv_msg_frame_time value)")
++MACRO_CONFIG_INT(sv_msg_mute_time, 90, 0, 10000, CFGFLAG_SERVER, "How long are people muted")
++MACRO_CONFIG_INT(sv_max_idle, 60, 0, 10000, CFGFLAG_SERVER, "After this time afk-players join the spectators")
++MACRO_CONFIG_INT(sv_kick_idle, 1, 0, 1, CFGFLAG_SERVER, "Kick afk-player if the server is full")
++
++MACRO_CONFIG_INT(sv_start_health, 10, 0, 10, CFGFLAG_SERVER, "The player has this health after respawn.")
++MACRO_CONFIG_INT(sv_start_armor, 0, 0, 10, CFGFLAG_SERVER, "The player has this armor after respawn.")
++MACRO_CONFIG_INT(sv_start_hammer, 1, 0, 1, CFGFLAG_SERVER, "The player has a hammer after respawn.")
++MACRO_CONFIG_INT(sv_start_pistol, 10, 0, 10, CFGFLAG_SERVER, "The player has a pistol after respawn with this ammo.")
++MACRO_CONFIG_INT(sv_start_shotgun, 0, 0, 10, CFGFLAG_SERVER, "The player has a shotgun after respawn with this ammo.")
++MACRO_CONFIG_INT(sv_start_grenade, 0, 0, 10, CFGFLAG_SERVER, "The player has a grenadelauncher after respawn with this ammo.")
++MACRO_CONFIG_INT(sv_start_ninja, 0, 0, 1, CFGFLAG_SERVER, "The player has a ninja after respawn.")
++MACRO_CONFIG_INT(sv_start_rifle, 0, 0, 10, CFGFLAG_SERVER, "The player has a rifle after respawn with this ammo.")
++
++MACRO_CONFIG_INT(sv_pistol_regen, 500, 0, 100000, CFGFLAG_SERVER, "Ammo regeneration")
++MACRO_CONFIG_INT(sv_shotgun_regen, 0, 0, 100000, CFGFLAG_SERVER, "Ammo regeneration")
++MACRO_CONFIG_INT(sv_grenade_regen, 0, 0, 100000, CFGFLAG_SERVER, "Ammo regeneration")
++MACRO_CONFIG_INT(sv_rifle_regen, 0, 0, 100000, CFGFLAG_SERVER, "Ammo regeneration")
++MACRO_CONFIG_INT(sv_immediate_ammo_regen, 0, 0, 1, CFGFLAG_SERVER, "Not waiting the reload time before regenerating the ammo.")
++
++MACRO_CONFIG_STR(sv_pre_password_msg, 512, "Here is your password for the professional server. It's the correct one for this day and your nick, noone else.", CFGFLAG_SERVER, "Message the server gives the player who receives a password for pro-server")
++MACRO_CONFIG_INT(sv_generate_pro_pw, 0, 0, 1, CFGFLAG_SERVER, "Gives good players a password at the end of a round.")
++MACRO_CONFIG_INT(sv_use_pro_pw, 0, 0, 1, CFGFLAG_SERVER, "The player have to type in the custom password for his name or the general password.")
++MACRO_CONFIG_STR(sv_pro_password, 32, "", CFGFLAG_SERVER, "The general password for the professional server (is needed to generate and check passwords)")
++
++MACRO_CONFIG_INT(sv_reserved_slots, 0, 0, MAX_CLIENTS, CFGFLAG_SERVER, "Number of reserved slots")
++MACRO_CONFIG_STR(sv_reserved_slot_pass, 32, "", CFGFLAG_SERVER, "Password for a reserved slot")
++
++MACRO_CONFIG_INT(sv_handle_mapvotes, 1, 0, 1, CFGFLAG_SERVER, "Generates a special debug message and gives the player the feeling of voting for the map")
++
++
++
++MACRO_CONFIG_INT(sv_goaler_score, 1, 0, 1000, CFGFLAG_SERVER, "Score for the goaler")
++MACRO_CONFIG_INT(sv_passer_score, 1, 0, 1000, CFGFLAG_SERVER, "Score for the passer")
++MACRO_CONFIG_INT(sv_team_score, 1, 0, 1000, CFGFLAG_SERVER, "Score for the team")
++MACRO_CONFIG_INT(sv_team_pass_score, 1, 0, 1000, CFGFLAG_SERVER, "Score for the team through a goal with pass")
++MACRO_CONFIG_INT(sv_own_goal, 1, 0, 1000, CFGFLAG_SERVER, "Negative score for a wrong goal")
++
++MACRO_CONFIG_INT(sv_second_weapon, 0, 0, 6, CFGFLAG_SERVER, "The normal weapon if the player don't have the ball")
++MACRO_CONFIG_INT(sv_ball_att_decr, 0, 0, 1000, CFGFLAG_SERVER, "The ball owner's health is decreased by this in 10 seconds")
++MACRO_CONFIG_INT(sv_ball_def_decr, 0, 0, 1000, CFGFLAG_SERVER, "The ball owner's armor is decreased by this in 10 seconds")
++MACRO_CONFIG_INT(sv_bounce_loss_x, 50, 0, 100000, CFGFLAG_SERVER, "The ball looses that much x-speed after a bounce")
++MACRO_CONFIG_INT(sv_bounce_loss_y, 50, 0, 100000, CFGFLAG_SERVER, "The ball looses that much y-speed after a bounce")
++MACRO_CONFIG_INT(sv_explosions, 0, 0, 1, CFGFLAG_SERVER, "Should the grenades explode")
++MACRO_CONFIG_INT(sv_goal_keeptime, 5, 0, 100000, CFGFLAG_SERVER, "The goalkeeper fires the ball automatically after this time (0 immediately)")
++MACRO_CONFIG_INT(sv_player_keeptime, 3, 0, 100000, CFGFLAG_SERVER, "The player fires the ball automatically after this time (0 immediately)")
++MACRO_CONFIG_INT(sv_real_foot, 0, 0, 1, CFGFLAG_SERVER, "Disables the hammer")
++MACRO_CONFIG_INT(sv_suicide_score, 1, 0, 1, CFGFLAG_SERVER, "Count selfkills as negative score")
++MACRO_CONFIG_INT(sv_ball_respawn, 6, 0, 100000, CFGFLAG_SERVER, "Respawn time of the ball")
++MACRO_CONFIG_INT(sv_goalkeeper, 0, 0, 16, CFGFLAG_SERVER, "Enables goalkeeper")
++MACRO_CONFIG_INT(sv_goalkeeper_jumping, 0, 0, 1, CFGFLAG_SERVER, "Endless jumping of the goalkeeper")
++MACRO_CONFIG_INT(sv_hook_goalkeeper, 1, 0, 1, CFGFLAG_SERVER, "Enable the ability to hook goalkeeper")
++
++MACRO_CONFIG_INT(sv_pickup_with_no_armor, 1, 0, 1, CFGFLAG_SERVER, "Pickup the ball without any armor?")
++
++MACRO_CONFIG_INT(sv_diff_score, 0, 0, 1000, CFGFLAG_SERVER, "Difference between the team-scores before a team can win")
++MACRO_CONFIG_INT(sv_kill_score, 1, 0, 1, CFGFLAG_SERVER, "Are there points for a kill")
++
++MACRO_CONFIG_INT(sv_cwscore, 0, 0, 1, CFGFLAG_SERVER, "Should cw_score be displayed")
++
++MACRO_CONFIG_INT(sv_silent_mode, 0, 0, 1, CFGFLAG_SERVER, "No servermessages in the chat")
++MACRO_CONFIG_INT(sv_total_silence, 0, 0, 1, CFGFLAG_SERVER, "Disables the chat")
++MACRO_CONFIG_INT(sv_spec_silence, 0, 0, 1, CFGFLAG_SERVER, "The spectators can't speak global only under the spectators")
++MACRO_CONFIG_INT(sv_respawn_powerups, 1, 0, 1, CFGFLAG_SERVER, "Should the powerups respawn")
++MACRO_CONFIG_INT(sv_ball_reloader, 10, 0, 1000, CFGFLAG_SERVER, "Should the powerups respawn")
++
++MACRO_CONFIG_STR(sv_version_string, 32, "0.5 b67d1f1a1eea234e", CFGFLAG_SERVER, "Version string")
++
++
++MACRO_CONFIG_INT(sv_bumper_accelerate, 500, 0, 10000000, CFGFLAG_SERVER, "The acceleration getting from a bumper-tile divided by 1000")
++MACRO_CONFIG_INT(sv_bumper_brake, 500, 0, 100000, CFGFLAG_SERVER, "The braking getting from a bumper-tile divided by 1000")
++MACRO_CONFIG_INT(sv_brake, 500, 0, 10000000, CFGFLAG_SERVER, "The acceleration getting from a tile divided by 100000")
++MACRO_CONFIG_INT(sv_accelerate, 500, 0, 10000000, CFGFLAG_SERVER, "The acceleration getting from a tile divided by 100000")
++MACRO_CONFIG_INT(sv_accelerate_up, 500, 0, 10000000, CFGFLAG_SERVER, "The acceleration getting from a tile in one direction divided by 100000")
++MACRO_CONFIG_INT(sv_accelerate_right, 500, 0, 10000000, CFGFLAG_SERVER, "The acceleration getting from a tile in one direction divided by 100000")
++MACRO_CONFIG_INT(sv_accelerate_down, 500, 0, 10000000, CFGFLAG_SERVER, "The acceleration getting from a tile in one direction divided by 100000")
++MACRO_CONFIG_INT(sv_accelerate_left, 500, 0, 10000000, CFGFLAG_SERVER, "The acceleration getting from a tile in one direction divided by 100000")
++
++MACRO_CONFIG_INT(sv_goal_timer, 0, 0, 1, CFGFLAG_SERVER, "Activate a goal timer")
++MACRO_CONFIG_INT(sv_calc_steps, 100, 0, 10000000, CFGFLAG_SERVER, "Claculation steps per tick for the collision detection")
++MACRO_CONFIG_INT(sv_action_1_cause, 0, 0, 3, CFGFLAG_SERVER, "0 = ball, 1 = tee, 2 = red tee, 3 = blue tee")
++MACRO_CONFIG_INT(sv_action_1_tile, 0, 0, 10, CFGFLAG_SERVER, "0 = BUMPER_SPEEDUP, 1 = SPEEDUP, 2 = SPEEDUP_UP, 3 = SPEEDUP_RIGHT, 4 = SPEEDUP_DOWN, 5 = SPEEDUP_LEFT, 6 = BUMPER_SLOWDOWN, 7 = SLOWDOWN, 8 = BUMPER_RANDOM, 9 = RANDOM, 10 = BALL_RESET")
++MACRO_CONFIG_INT(sv_action_1_type, 0, -1, 10000000, CFGFLAG_SERVER, "-1 = activate, 0 = deactivate, X = activate for X seconds")
++MACRO_CONFIG_STR(sv_action_1_cmd, 512, "", CFGFLAG_SERVER, "Command that should be executed")
++MACRO_CONFIG_INT(sv_action_2_cause, 0, 0, 3, CFGFLAG_SERVER, "0 = ball, 1 = tee, 2 = red tee, 3 = blue tee")
++MACRO_CONFIG_INT(sv_action_2_tile, 0, 0, 10, CFGFLAG_SERVER, "0 = BUMPER_SPEEDUP, 1 = SPEEDUP, 2 = SPEEDUP_UP, 3 = SPEEDUP_RIGHT, 4 = SPEEDUP_DOWN, 5 = SPEEDUP_LEFT, 6 = BUMPER_SLOWDOWN, 7 = SLOWDOWN, 8 = BUMPER_RANDOM, 9 = RANDOM, 10 = BALL_RESET")
++MACRO_CONFIG_INT(sv_action_2_type, 0, -1, 10000000, CFGFLAG_SERVER, "-1 = activate, 0 = deactivate, X = activate for X seconds")
++MACRO_CONFIG_STR(sv_action_2_cmd, 512, "", CFGFLAG_SERVER, "Command that should be executed")
++MACRO_CONFIG_INT(sv_action_3_cause, 0, 0, 3, CFGFLAG_SERVER, "0 = ball, 1 = tee, 2 = red tee, 3 = blue tee")
++MACRO_CONFIG_INT(sv_action_3_tile, 0, 0, 10, CFGFLAG_SERVER, "0 = BUMPER_SPEEDUP, 1 = SPEEDUP, 2 = SPEEDUP_UP, 3 = SPEEDUP_RIGHT, 4 = SPEEDUP_DOWN, 5 = SPEEDUP_LEFT, 6 = BUMPER_SLOWDOWN, 7 = SLOWDOWN, 8 = BUMPER_RANDOM, 9 = RANDOM, 10 = BALL_RESET")
++MACRO_CONFIG_INT(sv_action_3_type, 0, -1, 10000000, CFGFLAG_SERVER, "-1 = activate, 0 = deactivate, X = activate for X seconds")
++MACRO_CONFIG_STR(sv_action_3_cmd, 512, "", CFGFLAG_SERVER, "Command that should be executed")
++MACRO_CONFIG_INT(sv_action_4_cause, 0, 0, 3, CFGFLAG_SERVER, "0 = ball, 1 = tee, 2 = red tee, 3 = blue tee")
++MACRO_CONFIG_INT(sv_action_4_tile, 0, 0, 10, CFGFLAG_SERVER, "0 = BUMPER_SPEEDUP, 1 = SPEEDUP, 2 = SPEEDUP_UP, 3 = SPEEDUP_RIGHT, 4 = SPEEDUP_DOWN, 5 = SPEEDUP_LEFT, 6 = BUMPER_SLOWDOWN, 7 = SLOWDOWN, 8 = BUMPER_RANDOM, 9 = RANDOM, 10 = BALL_RESET")
++MACRO_CONFIG_INT(sv_action_4_type, 0, -1, 10000000, CFGFLAG_SERVER, "-1 = activate, 0 = deactivate, X = activate for X seconds")
++MACRO_CONFIG_STR(sv_action_4_cmd, 512, "", CFGFLAG_SERVER, "Command that should be executed")
++MACRO_CONFIG_INT(sv_action_5_cause, 0, 0, 3, CFGFLAG_SERVER, "0 = ball, 1 = tee, 2 = red tee, 3 = blue tee")
++MACRO_CONFIG_INT(sv_action_5_tile, 0, 0, 10, CFGFLAG_SERVER, "0 = BUMPER_SPEEDUP, 1 = SPEEDUP, 2 = SPEEDUP_UP, 3 = SPEEDUP_RIGHT, 4 = SPEEDUP_DOWN, 5 = SPEEDUP_LEFT, 6 = BUMPER_SLOWDOWN, 7 = SLOWDOWN, 8 = BUMPER_RANDOM, 9 = RANDOM, 10 = BALL_RESET")
++MACRO_CONFIG_INT(sv_action_5_type, 0, -1, 10000000, CFGFLAG_SERVER, "-1 = activate, 0 = deactivate, X = activate for X seconds")
++MACRO_CONFIG_STR(sv_action_5_cmd, 512, "", CFGFLAG_SERVER, "Command that should be executed")
++MACRO_CONFIG_INT(sv_action_6_cause, 0, 0, 3, CFGFLAG_SERVER, "0 = ball, 1 = tee, 2 = red tee, 3 = blue tee")
++MACRO_CONFIG_INT(sv_action_6_tile, 0, 0, 10, CFGFLAG_SERVER, "0 = BUMPER_SPEEDUP, 1 = SPEEDUP, 2 = SPEEDUP_UP, 3 = SPEEDUP_RIGHT, 4 = SPEEDUP_DOWN, 5 = SPEEDUP_LEFT, 6 = BUMPER_SLOWDOWN, 7 = SLOWDOWN, 8 = BUMPER_RANDOM, 9 = RANDOM, 10 = BALL_RESET")
++MACRO_CONFIG_INT(sv_action_6_type, 0, -1, 10000000, CFGFLAG_SERVER, "-1 = activate, 0 = deactivate, X = activate for X seconds")
++MACRO_CONFIG_STR(sv_action_6_cmd, 512, "", CFGFLAG_SERVER, "Command that should be executed")
++
++
++MACRO_CONFIG_INT(sv_bumper_speedup, 1, 0, 1, CFGFLAG_SERVER, "is this tile activated at the beginning?")
++MACRO_CONFIG_INT(sv_speedup, 1, 0, 1, CFGFLAG_SERVER, "is this tile activated at the beginning?")
++MACRO_CONFIG_INT(sv_speedup_up, 1, 0, 1, CFGFLAG_SERVER, "is this tile activated at the beginning?")
++MACRO_CONFIG_INT(sv_speedup_right, 1, 0, 1, CFGFLAG_SERVER, "is this tile activated at the beginning?")
++MACRO_CONFIG_INT(sv_speedup_down, 1, 0, 1, CFGFLAG_SERVER, "is this tile activated at the beginning?")
++MACRO_CONFIG_INT(sv_speedup_left, 1, 0, 1, CFGFLAG_SERVER, "is this tile activated at the beginning?")
++MACRO_CONFIG_INT(sv_bumper_slowdown, 1, 0, 1, CFGFLAG_SERVER, "is this tile activated at the beginning?")
++MACRO_CONFIG_INT(sv_slowdown, 1, 0, 1, CFGFLAG_SERVER, "is this tile activated at the beginning?")
++MACRO_CONFIG_INT(sv_bumper_random, 1, 0, 1, CFGFLAG_SERVER, "is this tile activated at the beginning?")
++MACRO_CONFIG_INT(sv_random, 1, 0, 1, CFGFLAG_SERVER, "is this tile activated at the beginning?")
++MACRO_CONFIG_INT(sv_ball_reset, 1, 0, 1, CFGFLAG_SERVER, "is this tile activated at the beginning?")
++
++MACRO_CONFIG_INT(sv_vertex_radius, 0, 0, 31, CFGFLAG_SERVER, "is this tile activated at the beginning?")
++MACRO_CONFIG_INT(sv_conservative_collision, 0, 0, 1, CFGFLAG_SERVER, "is this tile activated at the beginning?")
++
++
++
++// matthis
++MACRO_CONFIG_INT(sv_new_pass_system, 0, 0, 1,    CFGFLAG_SERVER, "1 = Activate the new pass system, 2 = Deactivate it.")
++MACRO_CONFIG_INT(sv_pass_usability,  4, 0, 1000, CFGFLAG_SERVER, "In this time ( seconds ) you can exploit a pass.")
++MACRO_CONFIG_INT(sv_shot_usability,  4, 0, 1000, CFGFLAG_SERVER, "If the time between shoot and goal is bigger than it, there wont be a passpoint!")
++MACRO_CONFIG_INT(sv_passes_only,     0, 0, 1,    CFGFLAG_SERVER, "1 = You Can only score with Pass Goals")
++MACRO_CONFIG_INT(sv_owngoal_respawn, 0, 0, 1,    CFGFLAG_SERVER, "If sv_passes_only == 1 and someone does an own goal, then the players will respawn if sv_owngoal_respawn is 1, otherwise not.")
++
++
