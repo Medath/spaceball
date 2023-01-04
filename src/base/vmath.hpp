@@ -4,6 +4,8 @@
 
 // ------------------------------------
 
+#include <math.h>
+
 template<typename T>
 class vector2_base
 {
