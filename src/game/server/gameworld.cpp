@@ -138,6 +138,21 @@ void GAMEWORLD::remove_entities()
 	}
 }
 
+void GAMEWORLD::remove_projectiles()
+{
+        ENTITY *ent = first_entity;
+        while(ent)
+        {
+                ENTITY *next = ent->next_entity;
+                if(ent->objtype == NETOBJTYPE_PROJECTILE)
+                {
+                        remove_entity(ent);
+                        ent->destroy();
+                }
+                ent = next;
+        }
+}
+
 void GAMEWORLD::tick()
 {
 	if(reset_requested)

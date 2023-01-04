@@ -1,13 +1,16 @@
-/* copyright (c) 2007 magnus auvinen, see licence.txt for more info */
+#ifndef GAMECONTROLLER_MODS
+#define GAMECONTROLLER_MODS
 
 #include <game/server/gamecontroller.hpp>
 
-// you can subclass GAMECONTROLLER_CTF, GAMECONTROLLER_TDM etc if you want
-// todo a modification with their base as well.
 class GAMECONTROLLER_MOD : public GAMECONTROLLER
 {
 public:
 	GAMECONTROLLER_MOD();
-	virtual void tick();
-	// add more virtual functions here if you wish
+	virtual int on_character_death(class CHARACTER *victim, class PLAYER *killer, int weapon);
+	virtual void on_character_spawn(class CHARACTER *chr);
+	virtual void do_team_score_wincheck();
+	void endround();
 };
+
+#endif

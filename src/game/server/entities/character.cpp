@@ -1,9 +1,9 @@
+#include <base/math.hpp>
 #include <new>
 #include <engine/e_server_interface.h>
 #include <engine/e_config.h>
 #include <game/server/gamecontext.hpp>
 #include <game/mapitems.hpp>
-
 #include "character.hpp"
 #include "laser.hpp"
 #include "projectile.hpp"
@@ -75,7 +75,7 @@ bool CHARACTER::spawn(PLAYER *player, vec2 pos, int team)
 	player->force_balanced = false;
 
 	game.controller->on_character_spawn(this);
-
+	
 	return true;
 }
 
@@ -116,7 +116,7 @@ int CHARACTER::handle_ninja()
 	
 	vec2 direction = normalize(vec2(latest_input.target_x, latest_input.target_y));
 
-	if ((server_tick() - ninja.activationtick) > (data->weapons.ninja.duration * server_tickspeed() / 1000))
+	if ((!game.controller->mod || !config.sv_ninja_mod) && (server_tick() - ninja.activationtick) > (data->weapons.ninja.duration * server_tickspeed() / 1000))
 	{
 		// time's up, return
 		weapons[WEAPON_NINJA].got = false;
@@ -197,7 +197,7 @@ int CHARACTER::handle_ninja()
 
 void CHARACTER::do_weaponswitch()
 {
-	if(reload_timer != 0) // make sure we have reloaded
+	if(reload_timer != 0 || config.sv_ball_mod) // make sure we have reloaded
 		return;
 		
 	if(queued_weapon == -1) // check for a queued weapon
@@ -253,7 +253,7 @@ void CHARACTER::handle_weaponswitch()
 
 void CHARACTER::fire_weapon()
 {
-	if(reload_timer != 0)
+	if(reload_timer != 0 && !(fire_ball_tick && server_tick() >= fire_ball_tick))
 		return;
 		
 	do_weaponswitch();
@@ -269,6 +269,7 @@ void CHARACTER::fire_weapon()
 	bool will_fire = false;
 	if(count_input(latest_previnput.fire, latest_input.fire).presses) will_fire = true;
 	if(fullauto && (latest_input.fire&1) && weapons[active_weapon].ammo) will_fire = true;
+	if(fire_ball_tick && server_tick() >= fire_ball_tick) will_fire = true;
 	if(!will_fire)
 		return;
 		
@@ -293,33 +294,176 @@ void CHARACTER::fire_weapon()
 			
 			CHARACTER *ents[64];
 			int hits = 0;
-			int num = game.world.find_entities(pos+direction*phys_size*0.75f, phys_size*0.5f, (ENTITY**)ents, 64, NETOBJTYPE_CHARACTER);
-
+			int num;
+			if(config.sv_ball_mod)
+				num = game.world.find_entities(pos+direction*phys_size*0.9f, phys_size*0.5f, (ENTITY**)ents, 64, NETOBJTYPE_CHARACTER);
+			else
+				num = game.world.find_entities(pos+direction*phys_size*0.75f, phys_size*0.5f, (ENTITY**)ents, 64, NETOBJTYPE_CHARACTER);
+			if(partly_dead)
+				break;
 			for (int i = 0; i < num; i++)
 			{
 				CHARACTER *target = ents[i];
-				if (target == this)
+				if (target == this || target->player->team < 0)
 					continue;
-					
-				// hit a player, give him damage and stuffs...
-				vec2 fdir = normalize(ents[i]->pos - pos);
+				if(!config.sv_ball_mod)
+				{
+					// hit a player, give him damage and stuffs...
+					vec2 fdir = normalize(ents[i]->pos - pos);
 
-				// set his velocity to fast upward (for now)
-				game.create_hammerhit(pos);
-				ents[i]->take_damage(vec2(0,-1.0f), data->weapons.hammer.base->damage, player->client_id, active_weapon);
-				vec2 dir;
-				if (length(target->pos - pos) > 0.0f)
-					dir = normalize(target->pos - pos);
-				else
-					dir = vec2(0,-1);
+					// set his velocity to fast upward (for now)
+					game.create_hammerhit(pos);
+					ents[i]->take_damage(vec2(0,-1.0f), data->weapons.hammer.base->damage, player->client_id, active_weapon);
+					vec2 dir;
+					if (length(target->pos - pos) > 0.0f)
+						dir = normalize(target->pos - pos);
+					else
+						dir = vec2(0,-1);
 					
-				target->core.vel += normalize(dir + vec2(0,-1.1f)) * 10.0f;
+					target->core.vel += normalize(dir + vec2(0,-1.1f)) * 10.0f;
+				}
+				else
+				{
+					vec2 dir;
+					if (length(target->pos - pos) > 0.0f)
+						dir = normalize(target->pos - pos);
+					else
+						dir = vec2(0,-1);
+					target->core.vel += normalize(dir + vec2(0,-1.1f)) * 10.0f;
+					game.create_hammerhit(pos);
+					if(ents[i]->weapons[WEAPON_GRENADE].ammo > 0)
+					{
+						// matthis
+						// get ball by hitting an enemy
+						player->get_ball_time = server_tick();
+
+						game.controller->passer = -1;
+						weapons[WEAPON_GRENADE].got = true;
+						if(weapons[WEAPON_GRENADE].ammo < 10)
+							weapons[WEAPON_GRENADE].ammo++;
+						active_weapon = WEAPON_GRENADE;
+						last_weapon = WEAPON_GRENADE;
+						if(--ents[i]->weapons[WEAPON_GRENADE].ammo == 0)
+						{
+							ents[i]->weapons[WEAPON_GRENADE].got = false;
+							ents[i]->active_weapon = config.sv_second_weapon;
+							ents[i]->last_weapon = config.sv_second_weapon;
+							ents[i]->fire_ball_tick = 0;
+						}
+						if(player->goalkeeper)
+							fire_ball_tick = server_tick() + server_tickspeed()*config.sv_goal_keeptime;
+						else
+							fire_ball_tick = server_tick() + server_tickspeed()*config.sv_player_keeptime;
+					}
+					if(config.sv_hammer_team_att_loss && ents[i]->team == team)
+					{
+						if(health-config.sv_hammer_team_att_loss < 2)
+						{
+							health = 1;
+							partly_dead = server_tick() + server_tickspeed() * config.sv_partly_dead;
+						}
+						else
+						{
+							health -= config.sv_hammer_team_att_loss;
+						}
+					}
+					else if(config.sv_hammer_att_loss)
+					{
+						if(health-config.sv_hammer_att_loss < 2)
+						{
+							health = 1;
+							partly_dead = server_tick() + server_tickspeed() * config.sv_partly_dead;
+						}
+						else
+						{
+							health -= config.sv_hammer_att_loss;
+						}
+					}
+					if(config.sv_hammer_def_loss)
+					{
+						if(ents[i]->armor-config.sv_hammer_def_loss < 1)
+						{
+							ents[i]->armor = 0;
+							while(ents[i]->fire_ball_tick)
+							{
+								ents[i]->fire_ball_tick = 1;
+								ents[i]->fire_weapon();
+							}
+						}
+						else
+						{
+							ents[i]->armor -= config.sv_hammer_def_loss;
+						}
+					}
+					reload_timer = data->weapons.id[active_weapon].firedelay * server_tickspeed() / 1000;
+				}
 				hits++;
+			}
+			if(config.sv_big_hammer && hits == 0)
+			{
+				int num = game.world.find_entities(pos+direction*phys_size*2.5f, phys_size*1.5f, (ENTITY**)ents, 64, NETOBJTYPE_CHARACTER);
+				for (int i = 0; i < num; i++)
+				{
+					CHARACTER *target = ents[i];
+					if (target == this || target->player->team < 0)
+						continue;
+					game.create_hammerhit(ents[i]->pos);
+					if(config.sv_big_hammer_team_att_loss && ents[i]->team == team)
+					{
+						if(health-config.sv_big_hammer_team_att_loss < 2)
+						{
+							health = 1;
+							partly_dead = server_tick() + server_tickspeed() * config.sv_partly_dead;
+						}
+						else
+						{
+							health -= config.sv_big_hammer_team_att_loss;
+						}
+					}
+					if(config.sv_big_hammer_att_loss)
+					{
+						if(health-config.sv_big_hammer_att_loss < 2)
+						{
+							health = 1;
+							partly_dead = server_tick() + server_tickspeed() * config.sv_partly_dead;
+						}
+						else
+						{
+							health -= config.sv_big_hammer_att_loss;
+						}
+					}
+					if(config.sv_big_hammer_def_loss)
+					{
+						if(ents[i]->armor-config.sv_big_hammer_def_loss < 1)
+						{
+							ents[i]->armor = 0;
+							while(ents[i]->fire_ball_tick)
+							{
+								ents[i]->fire_ball_tick = 1;
+								ents[i]->fire_weapon();
+							}
+						}
+						else
+						{
+							ents[i]->armor -= config.sv_big_hammer_def_loss;
+						}
+					}
+					vec2 dir;
+					if (length(ents[i]->pos - pos) > 0.0f)
+						dir = normalize(ents[i]->pos - pos);
+					else
+						dir = vec2(0,-1);
+					
+					ents[i]->core.vel += normalize(dir + vec2(0,-1.1f)) * 4.0f;
+				}
 			}
 			
 			// if we hit anything, we have to wait for the reload
 			if(hits)
+			{
 				reload_timer = server_tickspeed()/3;
+				return;
+			}
 			
 		} break;
 
@@ -383,6 +527,8 @@ void CHARACTER::fire_weapon()
 
 		case WEAPON_GRENADE:
 		{
+			direction.x += core.vel.x*((float)config.sv_grenade_startspeed/10000.0f);
+			direction.y += core.vel.y*((float)config.sv_grenade_startspeed/10000.0f);
 			PROJECTILE *proj = new PROJECTILE(WEAPON_GRENADE,
 				player->client_id,
 				projectile_startpos,
@@ -402,6 +548,10 @@ void CHARACTER::fire_weapon()
 			server_send_msg(player->client_id);
 
 			game.create_sound(pos, SOUND_GRENADE_FIRE);
+			
+			// matthis ( store the shot time )
+			player->last_shot_time = server_tick();
+
 		} break;
 		
 		case WEAPON_RIFLE:
@@ -429,6 +579,14 @@ void CHARACTER::fire_weapon()
 
 	if(weapons[active_weapon].ammo > 0) // -1 == unlimited
 		weapons[active_weapon].ammo--;
+	if(config.sv_ball_mod && weapons[active_weapon].ammo == 0)
+	{
+		active_weapon = config.sv_second_weapon;
+		last_weapon = config.sv_second_weapon;
+		weapons[WEAPON_GRENADE].got = false;
+		queued_weapon = -1;
+		fire_ball_tick = 0;
+	}
 	attack_tick = server_tick();
 	if(!reload_timer)
 		reload_timer = data->weapons.id[active_weapon].firedelay * server_tickspeed() / 1000;
@@ -459,7 +617,7 @@ int CHARACTER::handle_weapons()
 	if(reload_timer)
 	{
 		reload_timer--;
-		return 0;
+		goto here;
 	}
 	
 	/*
@@ -471,13 +629,13 @@ int CHARACTER::handle_weapons()
 
 	// fire weapon, if wanted
 	fire_weapon();
-
+here:
 	// ammo regen
 	int ammoregentime = data->weapons.id[active_weapon].ammoregentime;
 	if(ammoregentime)
 	{
 		// If equipped and not active, regen ammo?
-		if (reload_timer <= 0)
+		if (reload_timer <= 0 || config.sv_immediate_ammo_regen)
 		{
 			if (weapons[active_weapon].ammoregenstart < 0)
 				weapons[active_weapon].ammoregenstart = server_tick();
@@ -502,7 +660,11 @@ void CHARACTER::on_predicted_input(NETOBJ_PLAYER_INPUT *new_input)
 {
 	// check for changes
 	if(mem_comp(&input, new_input, sizeof(NETOBJ_PLAYER_INPUT)) != 0)
+	{
+		if(last_action != -1)
+			player->last_input = server_tick();
 		last_action = server_tick();
+	}
 		
 	// copy new input
 	mem_copy(&input, new_input, sizeof(input));
@@ -544,6 +706,273 @@ void CHARACTER::tick()
 	core.input = input;
 	core.tick(true);
 	
+	if(game.controller->mod && player->team >= 0)
+	{
+		if(player->goalkeeper && (col_is_goal_limit((int)pos.x + phys_size/2, (int)pos.y + phys_size/2, player->team) || 
+			col_is_goal_limit((int)pos.x + phys_size/2, (int)pos.y - phys_size/2, player->team) || 
+			col_is_goal_limit((int)pos.x - phys_size/2, (int)pos.y + phys_size/2, player->team) || 
+			col_is_goal_limit((int)pos.x - phys_size/2, (int)pos.y - phys_size/2, player->team)))
+		{
+			if(fire_ball_tick)
+			{
+				fire_ball_tick = 1;
+				fire_weapon();
+			}
+			player->kill_character(-1);
+			return;
+		}
+		if(col_is_fool((int)pos.x + phys_size/2, (int)pos.y + phys_size/2, player->team) || 
+			col_is_fool((int)pos.x + phys_size/2, (int)pos.y - phys_size/2, player->team) || 
+			col_is_fool((int)pos.x - phys_size/2, (int)pos.y + phys_size/2, player->team) || 
+			col_is_fool((int)pos.x - phys_size/2, (int)pos.y - phys_size/2, player->team))
+		{
+			if(fire_ball_tick)
+			{
+				fire_ball_tick = 1;
+				fire_weapon();
+			}
+			player->kill_character(-1);
+			return;
+		}
+		
+		int action_tile = col_is_action_tile(pos.x, pos.y);
+		if(action_tile)
+		{
+			switch(action_tile)
+			{
+				case 1:
+					if(config.sv_action_1_cause == 1 || (config.sv_action_1_cause > 1 && player->team == config.sv_action_1_cause - 2))
+					{
+						game.controller->action_parser(config.sv_action_1_tile, config.sv_action_1_type, config.sv_action_1_cmd);
+					}
+					break;
+				case 2:
+					if(config.sv_action_2_cause == 0 || (config.sv_action_2_cause > 1 && player->team == config.sv_action_2_cause - 2))
+					{
+						game.controller->action_parser(config.sv_action_2_tile, config.sv_action_2_type, config.sv_action_1_cmd);
+					}
+					break;
+				case 3:
+					if(config.sv_action_3_cause == 0 || (config.sv_action_3_cause > 1 && player->team == config.sv_action_3_cause - 2))
+					{
+						game.controller->action_parser(config.sv_action_3_tile, config.sv_action_3_type, config.sv_action_1_cmd);
+					}
+					break;
+				case 4:
+					if(config.sv_action_4_cause == 0 || (config.sv_action_4_cause > 1 && player->team == config.sv_action_4_cause - 2))
+					{
+						game.controller->action_parser(config.sv_action_4_tile, config.sv_action_4_type, config.sv_action_1_cmd);
+					}
+					break;
+				case 5:
+					if(config.sv_action_5_cause == 0 || (config.sv_action_5_cause > 1 && player->team == config.sv_action_5_cause - 2))
+					{
+						game.controller->action_parser(config.sv_action_5_tile, config.sv_action_5_type, config.sv_action_1_cmd);
+					}
+					break;
+				case 6:
+					if(config.sv_action_6_cause == 0 || (config.sv_action_6_cause > 1 && player->team == config.sv_action_6_cause - 2))
+					{
+						game.controller->action_parser(config.sv_action_6_tile, config.sv_action_6_type, config.sv_action_1_cmd);
+					}
+					break;
+			}
+		}
+		
+		if(config.sv_goalkeeper && config.sv_goalkeeper_jumping && player->goalkeeper && server_tick()%15 == 0)
+		{
+			core.jumped = 0;
+		}
+		if(config.sv_goalkeeper && !config.sv_hook_goalkeeper && core.hooked_player != -1 && game.players[core.hooked_player]->goalkeeper)
+		{
+			core.hook_state = HOOK_RETRACT_START;
+			core.hooked_player = -1;
+		}
+	
+		if(!config.sv_hook_teammates && core.hooked_player != -1 && game.players[core.hooked_player]->team == team)
+		{
+			core.hook_state = HOOK_RETRACT_START;
+			core.hooked_player = -1;
+		}
+		bool decreasing = false;
+		if(partly_dead)
+		{
+			if(partly_dead < server_tick())
+				partly_dead = 0;
+			if(core.hooked_player >= 0)
+			{
+				core.hook_state = HOOK_RETRACT_START;
+				core.hooked_player = -1;
+			}
+			decreasing = true;
+		}
+		if(weapons[WEAPON_GRENADE].ammo > 0)
+		{
+			game.controller->ball = core.pos;
+			if(config.sv_ball_att_decr || config.sv_ball_def_decr)
+			{
+				decreasing = true;
+				if(player->goalkeeper)
+				{
+					if((fire_ball_tick-(server_tick()-server_tickspeed()*config.sv_goal_keeptime))%(int)(((float)10/(float)config.sv_ball_att_decr)*server_tickspeed()) == 0)
+					{
+						if(--health <= 1 && config.sv_partly_dead)
+						{
+							core.hook_state = HOOK_RETRACT_START;
+							core.hooked_player = -1;
+							if(fire_ball_tick)
+								fire_ball_tick = server_tick();
+							partly_dead = server_tick() + server_tickspeed() * config.sv_partly_dead;
+							health = 1;
+							armor = 0;
+						}
+					}
+					if(armor && (fire_ball_tick-(server_tick()-server_tickspeed()*config.sv_goal_keeptime))%(int)(((float)10/(float)config.sv_ball_def_decr)*server_tickspeed()) == 0)
+					{
+						if(--armor == 0 && config.sv_partly_dead)
+						{
+							armor = 0;
+							if(fire_ball_tick)
+								fire_ball_tick = server_tick();
+						}
+					}
+				}
+				else
+				{
+					if((fire_ball_tick-(server_tick()-server_tickspeed()*config.sv_player_keeptime))%(int)(((float)10/(float)config.sv_ball_att_decr)*server_tickspeed()) == 0)
+					{
+						if(--health <= 1 && config.sv_partly_dead)
+						{
+							core.hook_state = HOOK_RETRACT_START;
+							core.hooked_player = -1;
+							if(fire_ball_tick)
+								fire_ball_tick = server_tick();
+							partly_dead = server_tick() + server_tickspeed() * config.sv_partly_dead;
+							health = 1;
+							armor = 0;
+						}
+					}
+					if(armor && (fire_ball_tick-(server_tick()-server_tickspeed()*config.sv_player_keeptime))%(int)(((float)10/(float)config.sv_ball_def_decr)*server_tickspeed()) == 0)
+					{
+						if(--armor == 0)
+						{
+							armor = 0;
+							if(fire_ball_tick)
+								fire_ball_tick = server_tick();
+						}
+					}
+				}
+			}
+		}
+		if(core.hooked_player >= 0)
+		{
+			if(config.sv_hook_team_att_decr || config.sv_hook_att_decr)
+				decreasing = true;
+			if(config.sv_hook_team_att_decr && game.players[core.hooked_player]->team == team && core.hook_tick%(int)(((float)10/(float)config.sv_hook_team_att_decr)*server_tickspeed()) == 0)
+			{
+				if(--health <= 1 && config.sv_partly_dead)
+				{
+					core.hook_state = HOOK_RETRACT_START;
+					core.hooked_player = -1;
+					if(fire_ball_tick)
+						fire_ball_tick = server_tick();
+					partly_dead = server_tick() + server_tickspeed() * config.sv_partly_dead;
+					health = 1;
+					armor = 0;
+ 				}
+			}
+			else if(config.sv_hook_att_decr && core.hook_tick%(int)(((float)10/(float)config.sv_hook_att_decr)*server_tickspeed()) == 0)
+			{
+				if(--health <= 1 && config.sv_partly_dead)
+				{
+					core.hook_state = HOOK_RETRACT_START;
+					core.hooked_player = -1;
+					if(fire_ball_tick)
+						fire_ball_tick = server_tick();
+					partly_dead = server_tick() + server_tickspeed() * config.sv_partly_dead;
+					health = 1;
+					armor = 0;
+				}
+			}
+		}
+		if(config.sv_hook_def_decr || config.sv_hook_def_health_decr)
+		{
+			for(int i = 0; i < MAX_CLIENTS; i++)
+			{
+				if(!game.players[i])
+					continue;
+				CHARACTER *p = game.players[i]->get_character();
+				if(p && p->core.hooked_player == player->client_id)
+					decreasing = true;
+				if(config.sv_hook_def_decr && p && p->core.hooked_player == player->client_id && p->core.hook_tick%(int)(((float)10/(float)config.sv_hook_def_decr)*server_tickspeed()) == 0)
+				{
+					if(--armor == 0)
+					{
+						armor = 0;
+						if(fire_ball_tick)
+							fire_ball_tick = server_tick();
+						break;
+					}
+				}
+				if(config.sv_hook_def_health_decr && p && p->core.hooked_player == player->client_id && p->core.hook_tick%(int)(((float)10/(float)config.sv_hook_def_health_decr)*server_tickspeed()) == 0)
+				{
+					if(--health == 0)
+					{
+						if(config.sv_partly_dead)
+						{
+							core.hook_state = HOOK_RETRACT_START;
+							core.hooked_player = -1;
+							if(fire_ball_tick)
+								fire_ball_tick = server_tick();
+							partly_dead = server_tick() + server_tickspeed() * config.sv_partly_dead;
+							health = 1;
+							armor = 0;
+							break;
+						}
+						else
+						{
+							p->player->score++;
+							player->score++;
+							armor = 0;
+							if(fire_ball_tick)
+								fire_ball_tick = server_tick();
+							break;
+						}
+					}
+				}
+			}
+		}
+		if(config.sv_health_regen && !decreasing)
+		{
+			if(health < 10)
+			{
+				if(++health_regen % (int)(((float)10/(float)config.sv_health_regen)*server_tickspeed()) == 0)
+					health++;
+			}
+			else
+			{
+				health_regen = 0;
+			}
+		}
+		if(config.sv_armor_regen && !decreasing)
+		{
+			if(armor < 10)
+			{
+				if(++armor_regen % (int)(((float)10/(float)config.sv_armor_regen)*server_tickspeed()) == 0)
+					armor++;
+			}
+			else
+			{
+				armor_regen = 0;
+			}
+		}
+		if(health <= 0)
+		{
+			die(player->client_id, WEAPON_WORLD);
+			return;
+		}
+	}
+
 	float phys_size = 28.0f;
 	// handle death-tiles
 	if(col_get((int)(pos.x+phys_size/2), (int)(pos.y-phys_size/2))&COLFLAG_DEATH ||
@@ -551,6 +980,11 @@ void CHARACTER::tick()
 			col_get((int)(pos.x-phys_size/2), (int)(pos.y-phys_size/2))&COLFLAG_DEATH ||
 			col_get((int)(pos.x-phys_size/2), (int)(pos.y+phys_size/2))&COLFLAG_DEATH)
 	{
+		if(fire_ball_tick)
+		{
+			fire_ball_tick = 1;
+			fire_weapon();
+		}
 		die(player->client_id, WEAPON_WORLD);
 	}
 
@@ -655,6 +1089,11 @@ bool CHARACTER::increase_armor(int amount)
 
 void CHARACTER::die(int killer, int weapon)
 {
+	while(fire_ball_tick)
+	{
+		fire_ball_tick = 1;
+		fire_weapon();
+	}
 	/*if (dead || team == -1)
 		return;*/
 	int mode_special = game.controller->on_character_death(this, game.players[killer], weapon);
@@ -691,7 +1130,7 @@ void CHARACTER::die(int killer, int weapon)
 	game.create_death(pos, player->client_id);
 	
 	// we got to wait 0.5 secs before respawning
-	player->respawn_tick = server_tick()+server_tickspeed()/2;
+	//player->respawn_tick = server_tick()+server_tickspeed()/2;
 }
 
 bool CHARACTER::take_damage(vec2 force, int dmg, int from, int weapon)

@@ -13,6 +13,24 @@ enum
 
 int col_init();
 int col_is_solid(int x, int y);
+int col_is_red(int x, int y);
+int col_is_blue(int x, int y);
+int col_is_fool(int x, int y,int team);
+int col_is_goal_limit(int x, int y, int team);
+int col_is_bumper_speedup(int x, int y);
+int col_is_speedup(int x, int y);
+int col_is_speedup_up(int x, int y);
+int col_is_speedup_right(int x, int y);
+int col_is_speedup_down(int x, int y);
+int col_is_speedup_left(int x, int y);
+int col_is_bumper_slowdown(int x, int y);
+int col_is_slowdown(int x, int y);
+int col_is_bumper_random(int x, int y);
+int col_is_random(int x, int y);
+int col_is_player_collision(int x, int y);
+int col_is_ice(int x, int y);
+int col_is_ball_reset(int x, int y);
+int col_is_action_tile(int x, int y);
 int col_get(int x, int y);
 int col_width();
 int col_height();

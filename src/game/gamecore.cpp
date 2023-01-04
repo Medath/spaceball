@@ -1,6 +1,7 @@
 /* copyright (c) 2007 magnus auvinen, see licence.txt for more info */
 #include <string.h>
 #include "gamecore.hpp"
+#include <engine/e_config.h>
 
 const char *TUNING_PARAMS::names[] =
 {
@@ -198,6 +199,13 @@ void CHARACTER_CORE::tick(bool use_input)
 	float max_speed = grounded ? world->tuning.ground_control_speed : world->tuning.air_control_speed;
 	float accel = grounded ? world->tuning.ground_control_accel : world->tuning.air_control_accel;
 	float friction = grounded ? world->tuning.ground_friction : world->tuning.air_friction;
+	if(grounded && col_is_ice((int)pos.x, (int)pos.y))
+	{
+		max_speed = (float)config.sv_ice_max_speed/1000.0f;
+		accel = (float)config.sv_ice_accel/1000.0f;
+		friction = 1000.0f/((float)config.sv_ice_friction+1000.0f);
+	}
+	
 	
 	// handle input
 	if(use_input)

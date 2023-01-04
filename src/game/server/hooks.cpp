@@ -21,7 +21,11 @@ extern "C"
 #include "gamemodes/dm.hpp"
 #include "gamemodes/tdm.hpp"
 #include "gamemodes/ctf.hpp"
-#include "gamemodes/mod.hpp"
+#include "gamemodes/ball.hpp"
+#include "gamemodes/dmmod.hpp"
+#include "gamemodes/tdmmod.hpp"
+#include "gamemodes/ctfmod.hpp"
+#include "gamemodes/ko.hpp"
 
 TUNING_PARAMS tuning;
 
@@ -98,6 +102,51 @@ void mods_tick()
 		}
 	}
 #endif
+	for(int i = 0; i < MAX_CLIENTS && server_tick()%(config.sv_msg_frame_time * server_tickspeed()) == 0; i++)
+		if(game.players[i] && --game.players[i]->messages < 0)
+			game.players[i]->messages = 0;
+	if(strlen(config.sv_min_msg) > 0 && config.sv_msg_intervall && server_tick()%(config.sv_msg_intervall * 60 * server_tickspeed()) == 0)
+		game.send_chat(-1,-2,config.sv_min_msg);
+	if(server_tick()%100 || !(config.sv_kick_idle || config.sv_max_idle))
+		return;
+	int players_online = 0;
+	int players_ingame = 0;
+	int idler = -1;
+	for(int i = 0; i < config.sv_max_clients; i++)
+	{
+		if(game.players[i] && game.players[i]->client_id >= 0)
+		{
+			players_online++;
+			if(game.players[i]->team >= 0)
+				players_ingame++;
+			if(config.sv_max_idle && server_tick() - game.players[i]->last_input >= config.sv_max_idle * server_tickspeed())
+			{
+				if(idler == -1 && ((config.sv_ko_mod && game.players[i]->queue == -1) || !config.sv_ko_mod))
+					idler = i;
+				if(game.players[i]->team != -1)
+				{
+					game.players[i]->set_team(-1);
+					(void) game.controller->check_team_balance();
+					if(config.sv_ko_mod)
+					{
+						game.players[i]->queue = -2;
+						game.controller->endround();
+					}
+				}
+			}
+			if(game.players[i]->joined && game.players[i]->joined + server_tickspeed()*5 <= server_tick())
+			{
+				game.send_chat_target(i, "Please use .info to get help and information");
+				game.send_broadcast("Please use .info to get help and information", i);
+				game.players[i]->joined = 0;
+			}
+		}
+	}
+	if(config.sv_kick_idle && players_ingame < config.sv_max_clients - config.sv_spectator_slots && players_online >= config.sv_max_clients - config.sv_reserved_slots && idler != -1)
+	{
+		game.players[idler]->last_input = server_tick();
+		server_kick(idler, "You were away and the server was full... so you were automatically kicked");
+	}
 }
 
 void mods_snap(int client_id)
@@ -117,6 +166,12 @@ void mods_client_enter(int client_id)
 	game.send_chat(-1, GAMECONTEXT::CHAT_ALL, buf); 
 
 	dbg_msg("game", "team_join player='%d:%s' team=%d", client_id, server_clientname(client_id), game.players[client_id]->team);
+	game.players[client_id]->messages = 0;
+	game.players[client_id]->muted = 0;
+	game.players[client_id]->last_input = server_tick();
+	game.players[client_id]->queue = -1;
+	game.players[client_id]->voted = false;
+	game.players[client_id]->joined = server_tick();
 }
 
 void mods_connected(int client_id)
@@ -142,12 +197,24 @@ void mods_connected(int client_id)
 
 void mods_client_drop(int client_id)
 {
+	if(config.sv_goalkeeper && game.players[client_id]->team >= 0)
+	{
+		if(game.players[client_id]->goalkeeper)
+		{
+			game.players[client_id]->goalkeeper = 0;
+			game.controller->goalkeeper[game.players[client_id]->team]--;
+		}
+	}
+	game.players[client_id]->queue = -2;
+	bool endround = (game.players[client_id]->team >= 0 && config.sv_ko_mod) ? true:false;
 	game.abort_vote_kick_on_disconnect(client_id);
 	game.players[client_id]->on_disconnect();
 	delete game.players[client_id];
 	game.players[client_id] = 0;
 	
 	(void) game.controller->check_team_balance();
+	if(endround)
+		game.controller->endround();
 }
 
 /*static bool is_separator(char c) { return c == ';' || c == ' ' || c == ',' || c == '\t'; }
@@ -170,6 +237,27 @@ static const char *liststr_find(const char *str, const char *needle)
 	return 0;
 }*/
 
+int add_spam_msg(int client_id)
+{
+	if(game.players[client_id]->muted > server_tick())
+	{
+		game.send_broadcast("You are still muted!", client_id);
+		return -1;
+	}
+	game.players[client_id]->muted = 0;
+	if(++game.players[client_id]->messages > config.sv_max_msgs)
+	{
+		char buf[512];
+		strcpy(buf, server_clientname(client_id));
+		strcat(buf, " is muted now because of spamming.");
+		game.send_chat(-1,-2,buf);
+		game.send_broadcast("You are muted because of spamming", client_id);
+		dbg_msg("spam","muting now");
+		game.players[client_id]->muted = server_tick() + server_tickspeed()*config.sv_msg_mute_time;
+	}
+	return 0;
+}
+
 void mods_message(int msgtype, int client_id)
 {
 	void *rawmsg = netmsg_secure_unpack(msgtype);
@@ -183,6 +271,8 @@ void mods_message(int msgtype, int client_id)
 	
 	if(msgtype == NETMSGTYPE_CL_SAY)
 	{
+		if(add_spam_msg(client_id) == -1)
+			return;
 		NETMSG_CL_SAY *msg = (NETMSG_CL_SAY *)rawmsg;
 		int team = msg->team;
 		if(team)
@@ -194,6 +284,109 @@ void mods_message(int msgtype, int client_id)
 			return;
 		
 		p->last_chat = time_get();
+		p->last_input = server_tick();
+		if(config.sv_cwscore && strcmp("/cwscore",msg->message) == 0)
+		{
+			char buf[512];
+			str_format(buf,sizeof(buf), "Clanwar score: Red: %i Blue: %i", game.controller->cwscore[0], game.controller->cwscore[1]);
+			game.send_chat_target(p->client_id, buf);
+			return;
+		}
+		if(config.sv_handle_mapvotes && (strcmp("/++",msg->message) == 0 || strcmp("/--", msg->message) == 0))
+		{
+			if(game.players[client_id]->voted)
+			{
+				game.send_broadcast("You already voted, ignoring vote", client_id);
+			}
+			else
+			{
+				game.players[client_id]->voted = true;
+				dbg_msg("game", "map-voting %s", msg->message);
+				game.send_broadcast("You voted for the map, thank you", client_id);
+			}
+			return;
+		}
+		if(config.sv_goalkeeper && strcmp(msg->message, "/goalkeeper") == 0 && p->team >= 0)
+		{
+			if(!p->goalkeeper && game.controller->goalkeeper[p->team] < config.sv_goalkeeper)
+			{
+				char buf[300];
+				strcpy(buf,server_clientname(p->client_id));
+				p->goalkeeper = 1;
+				game.controller->goalkeeper[p->team]++;
+				strcat(buf, " is goalkeeper now");
+				game.send_chat(-1,-1,buf);
+				game.send_chat(-1,p->team,buf);
+				p->kill_character(-1);
+				return;
+			}
+			else if(p->goalkeeper)
+			{
+				game.controller->goalkeeper[p->team]--;
+				char buf[300];
+				strcpy(buf,server_clientname(p->client_id));
+				p->goalkeeper = 0;
+				strcat(buf, " is not a goalkeeper anymore");
+				game.send_chat(-1,-1,buf);
+				game.send_chat(-1,p->team,buf);
+				p->kill_character(-1);
+				return;
+			}
+			else
+			{
+				game.send_broadcast("No more goalkeepers", p->client_id);
+				return;
+			}
+		}
+		if(config.sv_ball_mod && strcmp(msg->message, "/ball") == 0)
+		{
+			p->ballposition = !p->ballposition;
+			return;
+		}
+		if(strcmp(msg->message, ".info") == 0)
+		{
+			game.send_chat_target(p->client_id, "MOD from scosu with support from Rajh. Commands:");
+			game.send_chat_target(p->client_id, ".modinfo (Help for the MOD)");
+			if(config.sv_ball_mod)
+				game.send_chat_target(p->client_id, "/ball (Enables/Disables the displaying of the ball position)");
+			if(config.sv_goalkeeper)
+				game.send_chat_target(p->client_id, "/goalkeeper (You become goalkeeper for your team)");
+			if(config.sv_handle_mapvotes)
+			{
+				game.send_chat_target(p->client_id, "/++ (You vote positive for the map)");
+				game.send_chat_target(p->client_id, "/-- (You vote negative for the map)");
+			}
+			if(config.sv_cwscore)
+				game.send_chat_target(p->client_id, "/cwscore (Shows you the current scores of both teams)");
+			return;
+		}
+		if(strcmp(msg->message, ".modinfo") == 0)
+		{
+			if(config.sv_ball_mod)
+			{
+				game.send_chat_target(p->client_id, "In this MOD you have to take the ball (grenade) and shoot it into the goal.");
+				game.send_chat_target(p->client_id, "Points:");
+				game.send_chat_target(p->client_id, "Goal with a pass: Goaler: 2 Passer: 1 Team: 3");
+				game.send_chat_target(p->client_id, "Goal without pass: Goaler: 2 Team: 2");
+				game.send_chat_target(p->client_id, "MOD from scosu with support from Rajh. You can download it at http://modpack.scosu.de");
+			}
+			else if(config.sv_ko_mod)
+			{
+				game.send_chat_target(p->client_id, "In this MOD every player playes at least one time. In the end there is a winner through something like a knockout-tournament. To join the game, you have to join one of the teams. If you are the next one in the queue, you automatically join one of the teams and the round begins.");
+				game.send_chat_target(p->client_id, "MOD from scosu with support from Rajh. You can download it at http://modpack.scosu.de");
+			}
+			else if(game.controller->mod)
+			{
+				game.send_chat_target(p->client_id, "It's a MOD. But no specified one. so just try out or check server info for help.");
+				game.send_chat_target(p->client_id, "MOD from scosu with support from Rajh. You can download it at http://modpack.scosu.de");
+			}
+			else
+			{
+				game.send_chat_target(p->client_id, "This server is running a normal game. It doesn't use a modified gameplay only some things for a better server behaviour.");
+				game.send_chat_target(p->client_id, "MOD from scosu with support from Rajh. You can download it at http://modpack.scosu.de");
+			}
+			return;
+		}
 		
 		game.send_chat(client_id, team, msg->message);
 	}
@@ -257,7 +450,7 @@ void mods_message(int msgtype, int client_id)
 				return;
 			}
 			
-			str_format(chatmsg, sizeof(chatmsg), "Vote called to kick '%s'", server_clientname(kick_id));
+			str_format(chatmsg, sizeof(chatmsg), "%s called a vote to kick '%s'", server_clientname(client_id), server_clientname(kick_id));
 			str_format(desc, sizeof(desc), "Kick '%s'", server_clientname(kick_id));
 			str_format(cmd, sizeof(cmd), "kick %d", kick_id);
 			if (!config.sv_vote_kick_bantime)
@@ -290,11 +483,76 @@ void mods_message(int msgtype, int client_id)
 	}
 	else if (msgtype == NETMSGTYPE_CL_SETTEAM && !game.world.paused)
 	{
+		if(add_spam_msg(client_id) == -1)
+			return;
 		NETMSG_CL_SETTEAM *msg = (NETMSG_CL_SETTEAM *)rawmsg;
 		
 		if(p->team == msg->team || (config.sv_spamprotection && p->last_setteam+time_freq()*3 > time_get()))
 			return;
-
+		p->last_input = server_tick();
+		if(config.sv_ko_mod)
+		{
+			if(game.players[client_id]->queue >= 0)
+			{
+				game.send_broadcast("You are already in waiting-queue... just wait", client_id);
+				return;
+			}
+			if(game.players[client_id]->team >= 0 && msg->team != -1)
+			{
+				game.send_broadcast("You are playing, you can't change team now", client_id);
+				return;
+			}
+			else if(game.players[client_id]->team >= 0)
+			{
+				p->set_team(-1);
+				p->queue = -2;
+				game.controller->endround();
+				return;
+			}
+			if(game.players[client_id]->queue == -2)
+			{
+				game.send_broadcast("You played already. Wait for the next round.", client_id);
+				return;
+			}
+			int player[2];
+			player[0] = -1;
+			player[1] = -1;
+			int max_queue = -1;
+			for(int i = 0; i < MAX_CLIENTS; i++)
+			{
+				if(game.players[i])
+				{
+					if(game.players[i]->team >= 0)
+						player[game.players[i]->team] = i;
+					if(game.players[i]->queue > max_queue)
+						max_queue = game.players[i]->queue;
+				}
+			}
+			if(max_queue != -1)
+			{
+				game.players[client_id]->queue = max_queue + 1;
+			}
+			else
+			{
+				game.players[client_id]->queue = -2;
+				if((player[0] != -1 && player[1] == -1) || (player[1] != -1 && player[0] == -1))
+				{
+					if(player[0] == -1)
+						game.players[client_id]->set_team(0);
+					else
+						game.players[client_id]->set_team(1);
+					game.controller->startround();
+					game.send_broadcast("The game starts now", -1);
+					return;
+				}
+				else if(player[0] != -1 && player[1] != -1)
+				{
+					game.players[client_id]->queue = 0;
+					game.send_broadcast("You are in the waiting-queue now", client_id);
+					return;
+				}
+			}
+		}
 		// Switch team on given client and kill/respawn him
 		if(game.controller->can_join_team(msg->team, client_id))
 		{
@@ -316,6 +574,8 @@ void mods_message(int msgtype, int client_id)
 	}
 	else if (msgtype == NETMSGTYPE_CL_CHANGEINFO || msgtype == NETMSGTYPE_CL_STARTINFO)
 	{
+		if(add_spam_msg(client_id) == -1)
+			return;
 		NETMSG_CL_CHANGEINFO *msg = (NETMSG_CL_CHANGEINFO *)rawmsg;
 		
 		if(config.sv_spamprotection && p->last_changeinfo+time_freq()*5 > time_get())
@@ -380,6 +640,8 @@ void mods_message(int msgtype, int client_id)
 	}
 	else if (msgtype == NETMSGTYPE_CL_EMOTICON && !game.world.paused)
 	{
+		if(add_spam_msg(client_id) == -1)
+			return;
 		NETMSG_CL_EMOTICON *msg = (NETMSG_CL_EMOTICON *)rawmsg;
 		
 		if(config.sv_spamprotection && p->last_emote+time_freq()*3 > time_get())
@@ -391,12 +653,58 @@ void mods_message(int msgtype, int client_id)
 	}
 	else if (msgtype == NETMSGTYPE_CL_KILL && !game.world.paused)
 	{
-		if(p->last_kill+time_freq()*3 > time_get())
+		p->last_input = server_tick();
+		if(p->last_kill+time_freq()*3 > time_get() || p->get_character() == NULL)
 			return;
 		
 		p->last_kill = time_get();
-		p->kill_character(WEAPON_SELF);
 		p->respawn_tick = server_tick()+server_tickspeed()*3;
+		p->kill_character(WEAPON_SELF);
+	}
+	for(int i = 0; i < MAX_CLIENTS && server_tick()%(config.sv_msg_frame_time * server_tickspeed()) == 0; i++)
+		if(game.players[i] && --game.players[i]->messages < 0)
+			game.players[i]->messages = 0;
+	if(strlen(config.sv_min_msg) > 0 && config.sv_msg_intervall && server_tick()%(config.sv_msg_intervall * 60 * server_tickspeed()) == 0)
+		game.send_chat(-1,-2,config.sv_min_msg);
+	if(server_tick()%100 || !(config.sv_kick_idle || config.sv_max_idle))
+		return;
+	int players_online = 0;
+	int players_ingame = 0;
+	int idler = -1;
+	for(int i = 0; i < config.sv_max_clients; i++)
+	{
+		if(game.players[i] && game.players[i]->client_id >= 0)
+		{
+			players_online++;
+			if(game.players[i]->team >= 0)
+				players_ingame++;
+			if(config.sv_max_idle && server_tick() - game.players[i]->last_input >= config.sv_max_idle * server_tickspeed())
+			{
+				if(idler == -1 && ((config.sv_ko_mod && game.players[i]->queue == -1) || !config.sv_ko_mod))
+					idler = i;
+				if(game.players[i]->team != -1)
+				{
+					game.players[i]->set_team(-1);
+					(void) game.controller->check_team_balance();
+					if(config.sv_ko_mod)
+					{
+						game.players[i]->queue = -2;
+						game.controller->endround();
+					}
+				}
+			}
+			if(game.players[i]->joined && game.players[i]->joined + server_tickspeed()*5 <= server_tick())
+			{
+				game.send_chat_target(i, "Please use .info to get help and information");
+				game.send_broadcast("Please use .info to get help and information", i);
+				game.players[i]->joined = 0;
+			}
+		}
+	}
+	if(config.sv_kick_idle && players_ingame < config.sv_max_clients - config.sv_spectator_slots && players_online >= config.sv_max_clients - config.sv_reserved_slots && idler != -1)
+	{
+		game.players[idler]->last_input = server_tick();
+		server_kick(idler, "You were away and the server was full... so you were automatically kicked");
 	}
 }
 
@@ -499,6 +807,114 @@ static void con_vote(void *result, void *user_data)
 	dbg_msg("server", "forcing vote %s", console_arg_string(result, 0));
 }
 
+static void con_respawn_ball(void *result, void *user_data)
+{
+	game.world.reset_requested = true;
+}
+
+static void con_mute(void *result, void *user_data)
+{
+	if(console_arg_int(result, 0) < 0 || console_arg_int(result, 0) >= MAX_CLIENTS)
+		return;
+	char buf[512];
+	strcpy(buf, server_clientname(console_arg_int(result, 0)));
+	strcat(buf, " is muted now.");
+	game.send_chat(-1,-2,buf);
+	game.send_broadcast("You are muted", console_arg_int(result, 0));
+	dbg_msg("spam","muting now");
+	game.players[console_arg_int(result, 0)]->muted = server_tick() + server_tickspeed()*console_arg_int(result, 1);
+}
+
+static void con_unmute(void *result, void *user_data)
+{
+	if(console_arg_int(result, 0) < 0 || console_arg_int(result, 0) >= MAX_CLIENTS)
+		return;
+	game.send_broadcast("You can speak again", console_arg_int(result, 0));
+	dbg_msg("spam","unmuting now");
+	game.players[console_arg_int(result, 0)]->muted = 0;
+	game.players[console_arg_int(result, 0)]->messages = 0;
+}
+
+static void con_gen_pw(void *result, void *user_data)
+{
+	if(console_arg_int(result, 0) < 0 || console_arg_int(result, 0) >= MAX_CLIENTS)
+		return;
+	char pw[9];
+	server_generate_pw(console_arg_int(result, 0), pw);
+	game.send_chat_target(console_arg_int(result, 0), pw);
+}
+
+static void con_set_score(void *result, void *user_data)
+{
+	if(console_arg_int(result, 0) < 0 || console_arg_int(result, 0) >= MAX_CLIENTS || !game.players[console_arg_int(result, 0)])
+		return;
+	game.players[console_arg_int(result, 0)]->score = console_arg_int(result, 1);
+	char buf[512];
+	sprintf(buf, "The admin set your score to %d", console_arg_int(result, 1));
+	game.send_broadcast(buf, console_arg_int(result, 0));
+}
+
+static void con_set_teamscore(void *result, void *user_data)
+{
+	if(console_arg_int(result, 0) < 0 || console_arg_int(result, 0) > 1)
+		return;
+	game.controller->teamscore[console_arg_int(result, 0)] = console_arg_int(result, 1);
+	char buf[512];
+	sprintf(buf, "The admin set score of %s team to %d", (console_arg_int(result, 0)?"blue":"red"), console_arg_int(result, 1));
+	game.send_broadcast(buf, console_arg_int(result, 0));
+}
+
+static void con_set_cwscore(void *result, void *user_data)
+{
+	if(console_arg_int(result, 0) < 0 || console_arg_int(result, 0) > 1)
+		return;
+	game.controller->cwscore[console_arg_int(result, 0)] = console_arg_int(result, 1);
+	char buf[512];
+	sprintf(buf, "The admin set cwscore of %s team to %d", (console_arg_int(result, 0)?"blue":"red"), console_arg_int(result, 1));
+	game.send_broadcast(buf, console_arg_int(result, 0));
+}
+
+static void con_reset_cwscore(void *result, void *user_data)
+{
+	game.controller->cwscore[0] = 0;
+	game.controller->cwscore[1] = 0;
+	char buf[512];
+	sprintf(buf, "reset of cwscore");
+	game.send_broadcast(buf, console_arg_int(result, 0));
+}
+
+static void con_kill(void *result, void *user_data)
+{
+	if(console_arg_int(result, 0) < 0 || console_arg_int(result, 0) >= MAX_CLIENTS || !game.players[console_arg_int(result, 0)])
+		return;
+	game.players[console_arg_int(result, 0)]->last_kill = time_get();
+	game.players[console_arg_int(result, 0)]->kill_character(-1); //(client_id, -1);
+	game.players[console_arg_int(result, 0)]->respawn_tick = server_tick()+server_tickspeed()*console_arg_int(result, 1);
+	char buf[512];
+	sprintf(buf, "The admin killed you for %d seconds", console_arg_int(result, 1));
+	game.send_broadcast(buf, console_arg_int(result, 0));
+}
+
+static void con_set_all_spec(void *result, void *user_data)
+{
+	for(int i = 0; i < MAX_CLIENTS; i++)
+	{
+		if(!game.players[i] || game.players[i]->team < 0)
+			continue;
+		game.players[i]->set_team(-1);
+	}
+}
+
+static void con_set_all_kick(void *result, void *user_data)
+{
+	for(int i = 0; i < MAX_CLIENTS; i++)
+	{
+		if(!game.players[i])
+			continue;
+		server_kick(i, console_arg_string(result, 0));
+	}
+}
+
 void mods_console_init()
 {
 	MACRO_REGISTER_COMMAND("tune", "si", CFGFLAG_SERVER, con_tune_param, 0, "");
@@ -513,6 +929,20 @@ void mods_console_init()
 
 	MACRO_REGISTER_COMMAND("addvote", "r", CFGFLAG_SERVER, con_addvote, 0, "");
 	MACRO_REGISTER_COMMAND("vote", "r", CFGFLAG_SERVER, con_vote, 0, "");
+	
+	
+	
+	MACRO_REGISTER_COMMAND("reset", "", CFGFLAG_SERVER, con_respawn_ball, 0, "");
+ 	MACRO_REGISTER_COMMAND("mute", "ii", CFGFLAG_SERVER, con_mute, 0, "");
+ 	MACRO_REGISTER_COMMAND("unmute", "i", CFGFLAG_SERVER, con_unmute, 0, "");
+ 	MACRO_REGISTER_COMMAND("gen_pro_pw", "i", CFGFLAG_SERVER, con_gen_pw, 0, "");
+ 	MACRO_REGISTER_COMMAND("set_teamscore", "ii", CFGFLAG_SERVER, con_set_teamscore, 0, "");
+ 	MACRO_REGISTER_COMMAND("set_cwscore", "ii", CFGFLAG_SERVER, con_set_cwscore, 0, "");
+ 	MACRO_REGISTER_COMMAND("set_playerscore", "ii", CFGFLAG_SERVER, con_set_score, 0, "");
+ 	MACRO_REGISTER_COMMAND("kill", "ii", CFGFLAG_SERVER, con_kill, 0, "");
+ 	MACRO_REGISTER_COMMAND("all_spec", "", CFGFLAG_SERVER, con_set_all_spec, 0, "");
+	MACRO_REGISTER_COMMAND("all_kick", "", CFGFLAG_SERVER, con_set_all_kick, 0, "");
+	MACRO_REGISTER_COMMAND("reset_cwscore", "", CFGFLAG_SERVER, con_reset_cwscore, 0, "");
 }
 
 void mods_init()
@@ -537,9 +967,20 @@ void mods_init()
 		game.controller = new GAMECONTROLLER_CTF;
 	else if(strcmp(config.sv_gametype, "tdm") == 0)
 		game.controller = new GAMECONTROLLER_TDM;
+	else if(strcmp(config.sv_gametype, "ball") == 0)
+		game.controller = new GAMECONTROLLER_BALL;
+	else if(strcmp(config.sv_gametype, "dm-mod") == 0)
+		game.controller = new GAMECONTROLLER_DMMOD;
+	else if(strcmp(config.sv_gametype, "tdm-mod") == 0)
+		game.controller = new GAMECONTROLLER_TDMMOD;
+	else if(strcmp(config.sv_gametype, "ctf-mod") == 0)
+		game.controller = new GAMECONTROLLER_CTFMOD;
+	else if(strcmp(config.sv_gametype, "ko") == 0)
+		game.controller = new GAMECONTROLLER_KO;
 	else
 		game.controller = new GAMECONTROLLER_DM;
-
+	game.controller->cwscore[0] = 0;
+	game.controller->cwscore[1] = 0;
 	// setup core world
 	//for(int i = 0; i < MAX_CLIENTS; i++)
 	//	game.players[i].core.world = &game.world.core;
@@ -564,6 +1005,11 @@ void mods_init()
 			{
 				vec2 pos(x*32.0f+16.0f, y*32.0f+16.0f);
 				game.controller->on_entity(index-ENTITY_OFFSET, pos);
+			}
+			else if(index == ENTITY_SPAWN_KEEPER_RED || index == ENTITY_SPAWN_KEEPER_BLUE)
+			{
+				vec2 pos(x*32.0f+16.0f, y*32.0f+16.0f);
+				game.controller->on_entity(index, pos);
 			}
 		}
 	}

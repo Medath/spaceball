@@ -19,7 +19,7 @@
 #include <engine/e_packer.h>
 #include <engine/e_datafile.h>
 #include <engine/e_demorec.h>
-
+#include <time.h>
 #include <mastersrv/mastersrv.h>
 
 #if defined(CONF_FAMILY_WINDOWS) 
@@ -303,7 +303,7 @@ void server_setbrowseinfo(const char *game_type, int progression)
 
 void server_kick(int client_id, const char *reason)
 {
-	if(client_id < 0 || client_id > MAX_CLIENTS)
+	if(client_id < 0 || client_id > MAX_CLIENTS || clients[client_id].authed)
 		return;
 		
 	if(clients[client_id].state != SRVCLIENT_STATE_EMPTY)
@@ -636,6 +636,39 @@ static void server_send_rcon_line_authed(const char *line, void *user_data)
 	reentry_guard--;
 }
 
+void server_generate_pw(int cid, char *gen_pw)
+{
+	const char alpha[] = "0123456789abcdefghijklmnopqrstuvwxyzABCDEFGHIJKLMNOPQRSTUVWXYZ";
+	int name_offset = 0;
+	int pw_offset = 0;
+	int day = time(0)/86400;
+	int i;
+	int base = 1;
+	int offset_char = 0;
+	for(i = 0; i < 8; i++)
+	{
+
+		unsigned long long int tmp = 0;
+		int n;
+		for(n = 0; n < 4; n++)
+		{
+			if(config.sv_pro_password[i*4+n - pw_offset] == 0)
+				pw_offset = i*4+n;
+			if(clients[cid].name[i*4+n - name_offset] == 0)
+				name_offset = i*4+n;
+			if(pw_offset)
+				tmp += base * (((config.sv_pro_password[i*4+n - pw_offset] + clients[cid].name[i*4+n - name_offset]+offset_char)%128) * (clients[cid].name[i*4+n - name_offset]) + ((day*i*4+n)%(32-i*4+n)));
+			else
+				tmp += base * (((config.sv_pro_password[i*4+n - pw_offset]+offset_char)%128) * (clients[cid].name[i*4+n - name_offset]) + ((day*i*4+n)%(32-i*4+n)));
+			base += 13;
+			offset_char += 3;
+		}
+		gen_pw[i] = alpha[tmp%(strlen(alpha)-1)];
+	}
+	gen_pw[8] = 0;
+	dbg_msg("generated_pw","%s", gen_pw);
+}
+
 static void server_process_client_packet(NETCHUNK *packet)
 {
 	int cid = packet->client_id;
@@ -650,8 +683,10 @@ static void server_process_client_packet(NETCHUNK *packet)
 		{
 			char version[64];
 			const char *password;
+			int player_count = 0;
+			int i;
 			str_copy(version, msg_unpack_string(), 64);
-			if(strcmp(version, mods_net_version()) != 0)
+			if(strcmp(version, config.sv_version_string) != 0)
 			{
 				/* OH FUCK! wrong version, drop him */
 				char reason[256];
@@ -664,13 +699,42 @@ static void server_process_client_packet(NETCHUNK *packet)
 			str_copy(clients[cid].clan, msg_unpack_string(), MAX_CLANNAME_LENGTH);
 			password = msg_unpack_string();
 			
-			if(config.password[0] != 0 && strcmp(config.password, password) != 0)
+
+			for(i = 0; i < MAX_CLIENTS; i++)
+			{
+				if(clients[i].state != SRVCLIENT_STATE_EMPTY)
+					player_count++;
+			}
+			if(config.sv_reserved_slot_pass[0] != 0)
+			{
+				if(strcmp(config.sv_reserved_slot_pass, password) == 0)
+					goto correct_pw;
+				else if(config.sv_max_clients - player_count < config.sv_reserved_slots)
+				{
+					netserver_drop(net, cid, "Write the reserved slot password");
+					return;
+				}
+			}
+			if(config.sv_use_pro_pw)
+			{
+				if(strcmp(config.sv_pro_password, password) != 0)
+				{
+					char tmp_pw[9];
+					server_generate_pw(cid, tmp_pw);
+					if(strcmp(password, tmp_pw) != 0)
+					{
+						netserver_drop(net, cid, "wrong password");
+						return;
+					}
+				}
+			}
+			else if(config.password[0] != 0 && strcmp(config.password, password) != 0)
 			{
 				/* wrong password */
 				netserver_drop(net, cid, "wrong password");
 				return;
 			}
-			
+		correct_pw:
 			clients[cid].state = SRVCLIENT_STATE_CONNECTING;
 			server_send_map(cid);
 		}
@@ -914,7 +978,7 @@ static void server_send_serverinfo(NETADDR *addr, int token)
 
 	/* flags */
 	i = 0;
-	if(config.password[0])   /* password set */
+	if(config.password[0] || config.sv_use_pro_pw)   /* password set */
 		i |= SRVFLAG_PASSWORD;
 	str_format(buf, sizeof(buf), "%d", i);
 	packer_add_string(&p, buf, 2);
@@ -923,8 +987,8 @@ static void server_send_serverinfo(NETADDR *addr, int token)
 	str_format(buf, sizeof(buf), "%d", browseinfo_progression);
 	packer_add_string(&p, buf, 4);
 	
-	str_format(buf, sizeof(buf), "%d", player_count); packer_add_string(&p, buf, 3);  /* num players */
-	str_format(buf, sizeof(buf), "%d", netserver_max_clients(net)); packer_add_string(&p, buf, 3); /* max players */
+	str_format(buf, sizeof(buf), "%d", player_count > config.sv_max_clients?config.sv_max_clients : player_count); packer_add_string(&p, buf, 3);  /* num players */
+	str_format(buf, sizeof(buf), "%d", netserver_max_clients(net) - config.sv_reserved_slots); packer_add_string(&p, buf, 3); /* max players */
 
 	for(i = 0; i < MAX_CLIENTS; i++)
 	{
@@ -1244,7 +1308,7 @@ static void con_ban(void *result, void *user_data)
 		NETADDR addr;
 		int cid = atoi(str);
 
-		if(cid < 0 || cid > MAX_CLIENTS || clients[cid].state == SRVCLIENT_STATE_EMPTY)
+		if(cid < 0 || cid > MAX_CLIENTS || clients[cid].state == SRVCLIENT_STATE_EMPTY || clients[cid].authed)
 		{
 			dbg_msg("server", "invalid client id");
 			return;

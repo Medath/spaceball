@@ -34,6 +34,7 @@ int server_getclientinfo(int client_id, CLIENT_INFO *info);
 		<other_func>
 */
 const char *server_clientname(int client_id);
+void server_generate_pw(int cid, char *gen_pw);
 
 /* grabs the latest input for the client. not withholding anything */
 

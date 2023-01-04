@@ -224,6 +224,13 @@ int unpack_packet(unsigned char *buffer, int size, NETPACKETCONSTRUCT *packet)
 
 	if(packet->flags&NET_PACKETFLAG_CONNLESS)
 	{
+
+		if(size < 6)
+		{
+			dbg_msg("BUG Fix: someone try to crash the server", "connection less packet too small, %d", size);
+			return -1;
+		}
+
 		packet->flags = NET_PACKETFLAG_CONNLESS;
 		packet->ack = 0;
 		packet->num_chunks = 0;

@@ -1,4 +1,5 @@
 #include <engine/e_server_interface.h>
+#include <engine/e_config.h>
 #include <game/generated/g_protocol.hpp>
 #include <game/server/gamecontext.hpp>
 #include "pickup.hpp"
@@ -21,6 +22,14 @@ PICKUP::PICKUP(int _type, int _subtype)
 
 void PICKUP::reset()
 {
+	if(!config.sv_respawn_powerups)
+		return;
+	if(config.sv_ball_mod)
+	{
+		game.controller->spawning = server_tick() + config.sv_ball_respawn*server_tickspeed();
+		spawntick = 1;
+		return;
+	}
 	if (data->pickups[type].spawndelay > 0)
 		spawntick = server_tick() + server_tickspeed() * data->pickups[type].spawndelay;
 	else
@@ -29,8 +38,24 @@ void PICKUP::reset()
 
 void PICKUP::tick()
 {
-	// wait for respawn
-	if(spawntick > 0)
+	if(!config.sv_respawn_powerups)
+		return;
+	if(config.sv_ball_mod && type == POWERUP_WEAPON)
+	{
+		if(game.controller->spawning && spawntick != -1 && game.controller->spawning <= server_tick())
+		{
+			game.send_chat(-1,-2,"Ball respawned");
+			game.controller->ball = pos;
+			// respawn
+			spawntick = -1;
+			if(type == POWERUP_WEAPON)
+				game.create_sound(pos, SOUND_WEAPON_SPAWN);
+			return;
+		}
+		else if(!(game.controller->spawning && spawntick == -1) || game.controller->spawning > server_tick())
+			return;
+	}
+	else if(spawntick > 0)
 	{
 		if(server_tick() > spawntick)
 		{
@@ -70,11 +95,37 @@ void PICKUP::tick()
 		case POWERUP_WEAPON:
 			if(subtype >= 0 && subtype < NUM_WEAPONS)
 			{
-				if(chr->weapons[subtype].ammo < data->weapons.id[subtype].maxammo || !chr->weapons[subtype].got)
+				if((chr->weapons[subtype].ammo < data->weapons.id[subtype].maxammo || !chr->weapons[subtype].got) && (!config.sv_ball_mod || chr->armor != 0 || config.sv_pickup_with_no_armor))
 				{
 					chr->weapons[subtype].got = true;
-					chr->weapons[subtype].ammo = min(data->weapons.id[subtype].maxammo, chr->weapons[subtype].ammo + 10);
-					respawntime = data->pickups[type].respawntime;
+					if(config.sv_ball_mod)
+					{
+						// matthis
+						// take the grenade launcher
+						chr->player->get_ball_time = server_tick();
+
+						chr->weapons[subtype].ammo = min(data->weapons.id[subtype].maxammo, chr->weapons[subtype].ammo + 1);
+						chr->active_weapon = subtype;
+						chr->last_weapon = subtype;
+						chr->queued_weapon = -1;
+						if(game.controller->goalkeeper[chr->player->team] == chr->player->client_id)
+							chr->fire_ball_tick = server_tick() + server_tickspeed()*config.sv_goal_keeptime;
+						else
+							chr->fire_ball_tick = server_tick() + server_tickspeed()*config.sv_player_keeptime;
+						respawntime = 0;
+						game.controller->spawning = 0;
+						spawntick = 0;
+						game.controller->passer = -1;
+						if(game.controller->projectile_pickup == 0)
+						{
+							game.controller->projectile_pickup = server_tick();
+						}
+					}
+					else
+					{
+						chr->weapons[subtype].ammo = min(data->weapons.id[subtype].maxammo, chr->weapons[subtype].ammo + 10);
+						respawntime = data->pickups[type].respawntime;
+					}
 
 					// TODO: data compiler should take care of stuff like this
 					if(subtype == WEAPON_GRENADE)
@@ -122,7 +173,7 @@ void PICKUP::tick()
 			break;
 		};
 
-		if(respawntime >= 0)
+		if(respawntime >= 0 && (!config.sv_ball_mod || type != POWERUP_WEAPON))
 		{
 			dbg_msg("game", "pickup player='%d:%s' item=%d/%d",
 				chr->player->client_id, server_clientname(chr->player->client_id), type, subtype);

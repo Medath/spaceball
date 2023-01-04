@@ -14,7 +14,7 @@ class CHARACTER;
 class GAMEWORLD
 {
 	void reset();
-	void remove_entities();
+	
 
 	enum
 	{
@@ -26,6 +26,8 @@ class GAMEWORLD
 	ENTITY *first_entity_types[NUM_ENT_TYPES];
 
 public:
+	void remove_entities();
+	void remove_projectiles();
 	bool reset_requested;
 	bool paused;
 	WORLD_CORE core;

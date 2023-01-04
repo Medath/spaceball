@@ -25,6 +25,8 @@ GAMECONTROLLER::GAMECONTROLLER()
 	game_flags = 0;
 	teamscore[0] = 0;
 	teamscore[1] = 0;
+	cwscore[0] = 0;
+	cwscore[1] = 1;
 	map_wish[0] = 0;
 	
 	unbalanced_tick = -1;
@@ -33,6 +35,8 @@ GAMECONTROLLER::GAMECONTROLLER()
 	num_spawn_points[0] = 0;
 	num_spawn_points[1] = 0;
 	num_spawn_points[2] = 0;
+	num_spawn_points[3] = 0;
+	num_spawn_points[4] = 0;
 }
 
 GAMECONTROLLER::~GAMECONTROLLER()
@@ -120,6 +124,10 @@ bool GAMECONTROLLER::on_entity(int index, vec2 pos)
 		spawn_points[1][num_spawn_points[1]++] = pos;
 	else if(index == ENTITY_SPAWN_BLUE)
 		spawn_points[2][num_spawn_points[2]++] = pos;
+	else if(index == ENTITY_SPAWN_KEEPER_RED)
+		spawn_points[3][num_spawn_points[3]++] = pos;
+	else if(index == ENTITY_SPAWN_KEEPER_BLUE)
+		spawn_points[4][num_spawn_points[4]++] = pos;
 	else if(index == ENTITY_ARMOR_1)
 		type = POWERUP_ARMOR;
 	else if(index == ENTITY_HEALTH_1)
@@ -159,7 +167,18 @@ void GAMECONTROLLER::endround()
 {
 	if(warmup) // game can't end when we are running warmup
 		return;
-		
+	
+	if(config.sv_cwscore)
+	{
+		if(teamscore[0] > teamscore[1])
+			cwscore[0]++;
+		else if(teamscore[1] > teamscore[0])
+			cwscore[1]++;
+		char buf[512];
+		str_format(buf,sizeof(buf), "Clanwar score: Red: %i Blue: %i", cwscore[0], cwscore[1]);
+		game.send_chat(-1,-2, buf);
+	}
+	
 	game.world.paused = true;
 	game_over_tick = server_tick();
 	sudden_death = 0;

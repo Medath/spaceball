@@ -23,6 +23,9 @@ public:
 	float force;
 	int start_tick;
 	
+	int pick_up_again;
+	bool randomized;
+	
 	PROJECTILE(int type, int owner, vec2 pos, vec2 vel, int span,
 		int damage, int flags, float force, int sound_impact, int weapon);
 

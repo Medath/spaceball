@@ -1,17 +1,23 @@
 #include <new>
 
 #include <engine/e_server_interface.h>
-
+#include <engine/e_config.h>
 #include "player.hpp"
 #include "gamecontext.hpp"
+#include <string.h>
+#include <stdio.h>
 
 MACRO_ALLOC_POOL_ID_IMPL(PLAYER, MAX_CLIENTS)
 
 PLAYER::PLAYER(int client_id)
 {
+	last_input = server_tick();
 	respawn_tick = server_tick();
 	character = 0;
 	this->client_id = client_id;
+	ballposition = false;
+	spawning = false;
+	goalkeeper = 0;
 }
 
 PLAYER::~PLAYER()
@@ -45,7 +51,7 @@ void PLAYER::tick()
 		}
 	}
 	
-	if(!character && die_tick+server_tickspeed()*3 <= server_tick())
+	if(!character && die_tick+server_tickspeed()*3 <= server_tick() && team >= 0)
 		spawning = true;
 
 	if(character)
@@ -62,6 +68,52 @@ void PLAYER::tick()
 	}
 	else if(spawning && respawn_tick <= server_tick())
 		try_respawn();
+	if(server_tick()%server_tickspeed() == 0 && config.sv_ball_mod && ballposition && game.controller->spawning == 0)
+	{
+		char buf[512];
+		if(game.controller->ball.x == 0 && game.controller->ball.y == 0)
+		{
+			strcpy(buf, "Wait a moment for ball respawn");
+		}
+		else if(game.players[client_id])
+		{
+			CHARACTER *tmp;
+			if(tmp = get_character())
+			{
+				if((int)(tmp->core.pos.x/32) == (int)(game.controller->ball.x/32) && (int)(tmp->core.pos.y/32) == (int)(game.controller->ball.y/32))
+				{
+					strcpy(buf,"O");
+				}
+				else if(tmp->core.pos.x > game.controller->ball.x)
+				{
+					if(tmp->core.pos.y > game.controller->ball.y)
+					{
+						sprintf(buf, "< %i\n^ %i", abs((tmp->core.pos.x-game.controller->ball.x)/32), abs((tmp->core.pos.y-game.controller->ball.y)/32));
+					}
+					else
+					{
+					sprintf(buf, "< %i\nv %i", abs((tmp->core.pos.x-game.controller->ball.x)/32), abs((tmp->core.pos.y-game.controller->ball.y)/32));
+					}
+				}
+				else
+				{
+					if(tmp->core.pos.y > game.controller->ball.y)
+					{
+						sprintf(buf, "> %i\n^ %i", abs((tmp->core.pos.x-game.controller->ball.x)/32), abs((tmp->core.pos.y-game.controller->ball.y)/32));
+					}
+					else
+					{
+						sprintf(buf, "> %i\nv %i", abs((tmp->core.pos.x-game.controller->ball.x)/32), abs((tmp->core.pos.y-game.controller->ball.y)/32));
+					}
+				}
+			}
+			else
+			{
+				strcpy(buf, "First you have to respawn");
+			}
+		}
+		game.send_broadcast(buf, client_id);
+	}
 }
 
 void PLAYER::snap(int snapping_client)
@@ -155,11 +207,18 @@ void PLAYER::set_team(int new_team)
 	game.send_chat(-1, GAMECONTEXT::CHAT_ALL, buf); 
 	
 	kill_character(WEAPON_GAME);
+	if(config.sv_goalkeeper && config.sv_ball_mod && goalkeeper)
+	{
+		goalkeeper = 0;
+		game.controller->goalkeeper[team]--;
+	}
 	team = new_team;
-	score = 0;
+	//score = 0;
 	dbg_msg("game", "team_join player='%d:%s' team=%d", client_id, server_clientname(client_id), team);
-	
+
 	game.controller->on_player_info_change(game.players[client_id]);
+	if(team == -1)
+		spawning = false;
 }
 
 void PLAYER::try_respawn()

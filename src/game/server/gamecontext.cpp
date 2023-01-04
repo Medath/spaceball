@@ -1,6 +1,7 @@
 #include <string.h>
 #include <new>
 #include <engine/e_server_interface.h>
+#include <engine/e_config.h>
 #include "gamecontext.hpp"
 
 GAMECONTEXT game;
@@ -178,6 +179,10 @@ void GAMECONTEXT::send_chat(int chatter_cid, int team, const char *text)
 	else
 		dbg_msg("chat", "*** %s", text);
 
+	if((config.sv_silent_mode && chatter_cid == -1) || (config.sv_total_silence))
+		return;
+	if(config.sv_spec_silence && chatter_cid >= 0 && chatter_cid < MAX_CLIENTS && game.players[chatter_cid] && game.players[chatter_cid]->team == -1)
+		team = -1;
 	if(team == CHAT_ALL)
 	{
 		NETMSG_SV_CHAT msg;
@@ -347,6 +352,11 @@ void GAMECONTEXT::tick()
 		
 			if(vote_enforce == VOTE_ENFORCE_YES || yes >= total/2+1)
 			{
+				if(strncmp(vote_command, "change_map", 10) == 0)
+				{
+					controller->cwscore[0] = 0;
+					controller->cwscore[1] = 0;
+				}
 				console_execute_line(vote_command);
 				end_vote();
 				send_chat(-1, GAMECONTEXT::CHAT_ALL, "Vote passed");

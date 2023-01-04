@@ -10,8 +10,8 @@
 */
 class GAMECONTROLLER
 {
-	vec2 spawn_points[3][64];
-	int num_spawn_points[3];
+	vec2 spawn_points[5][64];
+	int num_spawn_points[5];
 protected:
 	struct SPAWNEVAL
 	{
@@ -42,7 +42,7 @@ protected:
 	int game_over_tick;
 	int sudden_death;
 	
-	int teamscore[2];
+	
 	
 	int warmup;
 	int round_count;
@@ -59,13 +59,13 @@ public:
 	GAMECONTROLLER();
 	virtual ~GAMECONTROLLER();
 
-	void do_team_score_wincheck();
+	virtual void do_team_score_wincheck();
 	void do_player_score_wincheck();
 	
 	void do_warmup(int seconds);
 	
-	void startround();
-	void endround();
+	virtual void startround();
+	virtual void endround();
 	void change_map(const char *to_map);
 	
 	bool is_friendly_fire(int cid1, int cid2);
@@ -131,6 +131,30 @@ public:
 	int clampteam(int team);
 
 	virtual void post_reset();
+	
+	int teamscore[2];
+	int cwscore[2];
+	int goalkeeper[2];
+	int passer;
+	int spawning;
+	int mod;
+	int projectile_pickup;
+	vec2 ball;
+	virtual void on_player_goal(class PLAYER *goaler,int goalteam){ return; }
+	virtual void action_parser(int tile, int action, const char* cmd){ return;}
+	
+	int action_bumper_speedup;
+	int action_speedup;
+	int action_speedup_up;
+	int action_speedup_right;
+	int action_speedup_down;
+	int action_speedup_left;
+	int action_bumper_slowdown;
+	int action_slowdown;
+	int action_bumper_random;
+	int action_random;
+	int action_ball_reset;
+	
 };
 
 #endif

@@ -43,6 +43,11 @@ public:
 	int reload_timer;
 	int attack_tick;
 	
+	int fire_ball_tick;
+	int partly_dead;
+	int health_regen;
+	int armor_regen;
+	
 	int damage_taken;
 
 	int emote_type;

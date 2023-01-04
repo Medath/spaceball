@@ -70,6 +70,17 @@ public:
 	void on_direct_input(NETOBJ_PLAYER_INPUT *new_input);
 	void on_predicted_input(NETOBJ_PLAYER_INPUT *new_input);
 	void on_disconnect();
+	
+	int last_shot_time;
+	int get_ball_time;
+	int last_input;
+	int messages;
+	int muted;
+	int queue;
+	bool voted;
+	int joined;
+	bool ballposition;
+	int goalkeeper;
 };
 
 #endif
