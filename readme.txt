@@ -6,7 +6,7 @@ warranty. In no event will the authors be held liable for any damages
 arising from the use of this software.
 
 
-Please visit http://www.teeworlds.com for up-to-date information about 
+Please visit http://www.teeworlds.com for up-to-date information about
 the game, including new versions, custom maps and much more.
 
 Compilation instructions (Linux only):
@@ -18,3 +18,8 @@ cd ..
 ./bam/src/bam release
 ```
 Enjoy hunting down all dependencies
+
+Start a server with the spaceball config:
+```
+./teeworlds_srv -f spaceball_sample.cfg
+```
