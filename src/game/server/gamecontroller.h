@@ -10,6 +10,8 @@
 
 #include <generated/protocol.h>
 
+#include "game/server/entities/pickup.h"
+
 /*
 	Class: Game Controller
 		Controls the main game logic. Keeping track of team and player score,
@@ -150,6 +152,62 @@ public:
 	virtual void OnCharacterSpawn(class CCharacter *pChr);
 
 	virtual void OnFlagReturn(class CFlag *pFlag);
+
+
+	/*
+		Function: OnGoal
+			Called when a CBall decides that someone scored a goal.
+
+		Arguments:
+			Scorer - The CPlayer that made the goal.
+			Team - The team that will get the score.
+	*/
+	virtual void OnGoal(CPlayer *Scorer, int Team) {;}
+
+	/*
+		Function: OnBallSpawn
+			Called when a grenade CPickup spawns while in the "BALL" gamemode
+
+		Arguments:
+			none
+	*/
+	virtual void OnBallSpawn() {;}
+
+	/*
+		Function: OnBallSpawn
+			Called when a grenade CPickup is picked up in the "BALL" gamemode, or when a CBall projectile is picked up
+
+		Arguments:
+			Char - the character that picked it up
+	*/
+	virtual void OnBallPickup(CCharacter *Char) {;}
+
+	/*
+		Function: GetBallPickupTick
+			Returns the Tick when OnBallPickup was last called. 0 If it was never called
+
+		Arguments:
+			none
+	*/
+	virtual int GetBallPickupTick() { return 0; }
+
+	/*
+		Function: OnBallTimeout
+			Called when a CBall is destroyed due to its lifetime
+
+		Arguments:
+			none
+	*/
+	virtual void OnBallTimeout() {;}
+
+	/*
+		Function: GetPickupSpawnTick
+			Called when a CPickup wants to know when it has to spawn
+
+		Arguments:
+			originalTick - The tick that the CPickup would have normally used if this function didn't exist
+	*/
+	virtual int GetPickupSpawnTick(int originalTick) { return originalTick; }
 
 	/*
 		Function: on_entity

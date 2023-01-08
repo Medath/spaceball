@@ -44,7 +44,7 @@ public:
 	void OnPredictedInput(CNetObj_PlayerInput *pNewInput);
 	void OnDirectInput(CNetObj_PlayerInput *pNewInput);
 	void ResetInput();
-	void FireWeapon();
+	void FireWeapon(bool Forced = false);
 
 	void Die(int Killer, int Weapon);
 	bool TakeDamage(vec2 Force, vec2 Source, int Dmg, int From, int Weapon);
@@ -68,6 +68,7 @@ private:
 	class CPlayer *m_pPlayer;
 
 	bool m_Alive;
+	bool m_BallMode;
 
 	// weapon info
 	CEntity *m_apHitObjects[10];

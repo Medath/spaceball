@@ -20,6 +20,7 @@ public:
 private:
 	int m_Type;
 	int m_SpawnTick;
+	bool m_BallMode;
 };
 
 #endif

@@ -1596,6 +1596,8 @@ set_src(ENGINE_SERVER GLOB src/engine/server
 )
 set_src(GAME_SERVER GLOB_RECURSE src/game/server
   alloc.h
+  entities/ball.cpp
+  entities/ball.h
   entities/character.cpp
   entities/character.h
   entities/flag.cpp
@@ -1626,6 +1628,8 @@ set_src(GAME_SERVER GLOB_RECURSE src/game/server
   gamemodes/mod.h
   gamemodes/tdm.cpp
   gamemodes/tdm.h
+  gamemodes/ball.cpp
+  gamemodes/ball.h
   gameworld.cpp
   gameworld.h
   player.cpp

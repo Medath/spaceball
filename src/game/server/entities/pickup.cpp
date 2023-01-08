@@ -1,7 +1,10 @@
 /* (c) Magnus Auvinen. See licence.txt in the root of the distribution for more information. */
 /* If you are missing that file, acquire a complete release at teeworlds.com.                */
+#include <string.h>
+
 #include <generated/server_data.h>
 #include <game/server/gamecontext.h>
+#include <game/server/gamecontroller.h>
 #include <game/server/player.h>
 
 #include "character.h"
@@ -10,6 +13,7 @@
 CPickup::CPickup(CGameWorld *pGameWorld, int Type, vec2 Pos)
 : CEntity(pGameWorld, CGameWorld::ENTTYPE_PICKUP, Pos, PickupPhysSize)
 {
+	m_BallMode = !strcmp(GameServer()->m_pController->GetGameType(), "BALL");
 	m_Type = Type;
 
 	Reset();
@@ -27,6 +31,10 @@ void CPickup::Reset()
 
 void CPickup::Tick()
 {
+	if (m_BallMode) {
+		m_SpawnTick = GameServer()->m_pController->GetPickupSpawnTick(m_SpawnTick);
+	}
+	
 	// wait for respawn
 	if(m_SpawnTick > 0)
 	{
@@ -37,6 +45,9 @@ void CPickup::Tick()
 
 			if(m_Type == PICKUP_GRENADE || m_Type == PICKUP_SHOTGUN || m_Type == PICKUP_LASER)
 				GameServer()->CreateSound(m_Pos, SOUND_WEAPON_SPAWN);
+			if(m_BallMode) {
+				GameServer()->m_pController->OnBallSpawn();
+			}
 		}
 		else
 			return;
@@ -65,13 +76,21 @@ void CPickup::Tick()
 				}
 				break;
 
-			case PICKUP_GRENADE:
-				if(pChr->GiveWeapon(WEAPON_GRENADE, g_pData->m_Weapons.m_aId[WEAPON_GRENADE].m_Maxammo))
-				{
-					Picked = true;
-					GameServer()->CreateSound(m_Pos, SOUND_PICKUP_GRENADE);
-					if(pChr->GetPlayer())
-						GameServer()->SendWeaponPickup(pChr->GetPlayer()->GetCID(), WEAPON_GRENADE);
+			case PICKUP_GRENADE: {
+					int Ammo;
+					if (m_BallMode) {
+						Ammo = 1;
+						GameServer()->m_pController->OnBallPickup(pChr);
+					} else {
+						Ammo = g_pData->m_Weapons.m_aId[WEAPON_GRENADE].m_Maxammo;;
+					}
+					if(pChr->GiveWeapon(WEAPON_GRENADE, Ammo))
+					{
+						Picked = true;
+						GameServer()->CreateSound(m_Pos, SOUND_PICKUP_GRENADE);
+						if(pChr->GetPlayer())
+							GameServer()->SendWeaponPickup(pChr->GetPlayer()->GetCID(), WEAPON_GRENADE);
+					}
 				}
 				break;
 			case PICKUP_SHOTGUN:

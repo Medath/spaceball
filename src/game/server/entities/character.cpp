@@ -1,5 +1,7 @@
 /* (c) Magnus Auvinen. See licence.txt in the root of the distribution for more information. */
 /* If you are missing that file, acquire a complete release at teeworlds.com.                */
+#include <string.h>
+
 #include <engine/shared/config.h>
 
 #include <generated/server_data.h>
@@ -8,8 +10,10 @@
 #include <game/server/player.h>
 
 #include "character.h"
+#include "generated/protocol.h"
 #include "laser.h"
 #include "projectile.h"
+#include "ball.h"
 
 //input count
 struct CInputCount
@@ -47,6 +51,7 @@ CCharacter::CCharacter(CGameWorld *pWorld)
 	m_Health = 0;
 	m_Armor = 0;
 	m_TriggeredEvents = 0;
+	m_BallMode = !strcmp(GameServer()->m_pController->GetGameType(), "BALL");
 }
 
 void CCharacter::Reset()
@@ -249,7 +254,7 @@ void CCharacter::HandleWeaponSwitch()
 	DoWeaponSwitch();
 }
 
-void CCharacter::FireWeapon()
+void CCharacter::FireWeapon(bool Forced)
 {
 	if(m_ReloadTimer != 0)
 		return;
@@ -269,6 +274,10 @@ void CCharacter::FireWeapon()
 
 	if(FullAuto && (m_LatestInput.m_Fire&1) && m_aWeapons[m_ActiveWeapon].m_Ammo)
 		WillFire = true;
+
+	if(Forced) {
+		WillFire = true;
+	}
 
 	if(!WillFire)
 		return;
@@ -374,13 +383,27 @@ void CCharacter::FireWeapon()
 
 		case WEAPON_GRENADE:
 		{
-			new CProjectile(GameWorld(), WEAPON_GRENADE,
-				m_pPlayer->GetCID(),
-				ProjStartPos,
-				Direction,
-				(int)(Server()->TickSpeed()*GameServer()->Tuning()->m_GrenadeLifetime),
-				g_pData->m_Weapons.m_Grenade.m_pBase->m_Damage, true, 0, SOUND_GRENADE_EXPLODE, WEAPON_GRENADE);
+			if (m_BallMode) {
+				float speedFactor = (float) GameServer()->Tuning()->m_GrenadeSpeed / 10000.0f;
+				Direction.x += m_Core.m_Vel.x * speedFactor;
+				Direction.y += m_Core.m_Vel.y * speedFactor;
 
+				new CBall(GameWorld(), m_pPlayer->GetCID(),
+					ProjStartPos,
+					Direction,
+					(int)(Server()->TickSpeed()*GameServer()->Tuning()->m_GrenadeLifetime)
+				);
+
+				m_aWeapons[WEAPON_GRENADE].m_Got = false;
+			  SetWeapon(WEAPON_HAMMER);
+			} else {
+				new CProjectile(GameWorld(), WEAPON_GRENADE,
+					m_pPlayer->GetCID(),
+					ProjStartPos,
+					Direction,
+					(int)(Server()->TickSpeed()*GameServer()->Tuning()->m_GrenadeLifetime),
+					g_pData->m_Weapons.m_Grenade.m_pBase->m_Damage, true, 0, SOUND_GRENADE_EXPLODE, WEAPON_GRENADE);
+			}
 			GameServer()->CreateSound(m_Pos, SOUND_GRENADE_FIRE);
 		} break;
 
@@ -541,6 +564,27 @@ void CCharacter::Tick()
 		Die(m_pPlayer->GetCID(), WEAPON_WORLD);
 	}
 
+	if (m_BallMode) {
+		//Used to be config options in the original
+		const int BallArmorDecrease = 30;
+		const int ArmorRegenConst = 300;
+		const int BallPickupTick = GameServer()->m_pController->GetBallPickupTick();
+
+		int ArmorRegenVar = 0; //var from the original
+
+		if (m_aWeapons[WEAPON_GRENADE].m_Got) {
+			if (!m_Armor || (Server()->Tick() - BallPickupTick) % (int)((10.f / BallArmorDecrease) * Server()->TickSpeed()) == 0) {
+				if (--m_Armor <= 0) {
+					FireWeapon(true);
+					m_Armor = 0;
+				}
+			}
+		} else if (m_Armor < 10 &&
+							++ArmorRegenVar % (int)((10.f / (float)ArmorRegenConst) * Server()->TickSpeed()) == 0) {
+			m_Armor++;
+		}
+	}
+
 	// handle Weapons
 	HandleWeapons();
 }
@@ -658,6 +702,10 @@ bool CCharacter::IncreaseArmor(int Amount)
 
 void CCharacter::Die(int Killer, int Weapon)
 {
+	if (m_BallMode) {
+		FireWeapon(true);
+	}
+		
 	// we got to wait 0.5 secs before respawning
 	m_Alive = false;
 	m_pPlayer->m_RespawnTick = Server()->Tick()+Server()->TickSpeed()/2;
