@@ -23,6 +23,13 @@ void CGameControllerBALL::Tick()
 {
 	// this is the main part of the gamemode, this function is run every tick
 	IGameController::Tick();
+	if (m_GameStartTick == Server()->Tick()) {
+		//Game just started, reset everything
+		m_PickupSpawned = false;
+		m_PickedupTick = 0;
+		//Respawn Ball in 5 seconds
+		m_PickupRespawnTick = Server()->Tick() + Server()->TickSpeed() * 5;
+	}
 }
 
 void CGameControllerBALL::OnCharacterSpawn(CCharacter *pChr) {
