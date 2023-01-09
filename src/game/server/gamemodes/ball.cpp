@@ -84,6 +84,8 @@ int CGameControllerBALL::GetBallPickupTick() {
 }
 
 void CGameControllerBALL::OnBallTimeout() {
+	m_PickupSpawned = false;
+	m_PickedupTick = 0;
 	m_PickupRespawnTick = Server()->Tick();
 }
 
