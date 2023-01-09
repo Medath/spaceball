@@ -1616,6 +1616,8 @@ set_src(GAME_SERVER GLOB_RECURSE src/game/server
   gamecontext.h
   gamecontroller.cpp
   gamecontroller.h
+  gamemodes/ball.cpp
+  gamemodes/ball.h
   gamemodes/ctf.cpp
   gamemodes/ctf.h
   gamemodes/dm.cpp
@@ -1628,8 +1630,6 @@ set_src(GAME_SERVER GLOB_RECURSE src/game/server
   gamemodes/mod.h
   gamemodes/tdm.cpp
   gamemodes/tdm.h
-  gamemodes/ball.cpp
-  gamemodes/ball.h
   gameworld.cpp
   gameworld.h
   player.cpp
