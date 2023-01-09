@@ -7,6 +7,7 @@ class CGameControllerBALL : public IGameController
 private:
 	int m_PickupRespawnTick = -1;
 	bool m_PickupSpawned = false;
+	bool m_WasGameRunning = false;
 	int m_PickedupTick = 0;
 
 public:
