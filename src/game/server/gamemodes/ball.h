@@ -19,5 +19,6 @@ public:
 	virtual int GetBallPickupTick();
 	virtual void OnBallTimeout();
 	virtual int GetPickupSpawnTick(int originalTick);
+	virtual int OnCharacterDeath(CCharacter *pVictim, CPlayer *pKiller, int Weapon);
 };
 #endif

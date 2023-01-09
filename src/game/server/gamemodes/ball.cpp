@@ -106,3 +106,9 @@ int CGameControllerBALL::GetPickupSpawnTick(int originalTick) {
 	}
 	return m_PickupRespawnTick;
 }
+
+//IGameController::OnCharacterDeath messes with the player scores and respawn time when they die.
+//This stub is here to avoid that
+int CGameControllerBALL::OnCharacterDeath(CCharacter *pVictim, CPlayer *pKiller, int Weapon) {
+	return 0;
+}
