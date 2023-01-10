@@ -256,8 +256,9 @@ void CCharacter::HandleWeaponSwitch()
 
 void CCharacter::FireWeapon(bool Forced)
 {
-	if(m_ReloadTimer != 0)
+	if(m_ReloadTimer != 0) {
 		return;
+	}
 
 	DoWeaponSwitch();
 	vec2 Direction = normalize(vec2(m_LatestInput.m_TargetX, m_LatestInput.m_TargetY));
@@ -343,7 +344,7 @@ void CCharacter::FireWeapon(bool Forced)
 					pTarget->m_Core.m_Vel += normalize(Dir + vec2(0, -1.1f)) * 10.f;
 					GameServer()->CreateHammerHit(m_Pos); //pTarget->m_Pos is probably more correct but the original used m_Pos
 					if (pTarget->m_aWeapons[WEAPON_GRENADE].m_Got) {
-						GameServer()->Console()->Print(IConsole::OUTPUT_LEVEL_STANDARD, "char", "stolen");
+						GameServer()->Console()->Print(IConsole::OUTPUT_LEVEL_DEBUG, "game", "ball stolen");
 						pTarget->m_aWeapons[WEAPON_GRENADE].m_Got = false;
 			  		pTarget->SetWeapon(WEAPON_HAMMER);
 						//The player gets two ammo here, because at the end of the function it is reduced by one,
@@ -751,7 +752,8 @@ bool CCharacter::IncreaseArmor(int Amount)
 
 void CCharacter::Die(int Killer, int Weapon)
 {
-	if (m_BallMode) {
+	if (m_BallMode && m_ActiveWeapon != WEAPON_HAMMER) {
+		m_ReloadTimer = 0; //To *really* force a shot
 		FireWeapon(true);
 	}
 		
