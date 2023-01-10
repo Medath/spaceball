@@ -308,14 +308,23 @@ void CCharacter::FireWeapon(bool Forced)
 	{
 		case WEAPON_HAMMER:
 		{
+			//Constants that were config options in the original
+			const int HammerArmorLoss = 3;
+			const bool BigHammer = true;
+			const int BigHammerArmorLoss = 2;
+
 			// reset objects Hit
 			m_NumObjectsHit = 0;
 			GameServer()->CreateSound(m_Pos, SOUND_HAMMER_FIRE);
 
 			CCharacter *apEnts[MAX_CLIENTS];
 			int Hits = 0;
-			int Num = GameWorld()->FindEntities(ProjStartPos, GetProximityRadius()*0.5f, (CEntity**)apEnts,
-														MAX_CLIENTS, CGameWorld::ENTTYPE_CHARACTER);
+			int Num;
+		 	if (m_BallMode) {
+				Num = GameWorld()->FindEntities(m_Pos + Direction * GetProximityRadius() * 0.9f, GetProximityRadius() * 0.5f, (CEntity**)apEnts, MAX_CLIENTS, CGameWorld::ENTTYPE_CHARACTER);
+			} else {
+				Num = GameWorld()->FindEntities(ProjStartPos, GetProximityRadius() * 0.5f, (CEntity**)apEnts, MAX_CLIENTS, CGameWorld::ENTTYPE_CHARACTER);
+			}
 
 			for (int i = 0; i < Num; ++i)
 			{
@@ -324,21 +333,61 @@ void CCharacter::FireWeapon(bool Forced)
 				if ((pTarget == this) || GameServer()->Collision()->IntersectLine(ProjStartPos, pTarget->m_Pos, NULL, NULL))
 					continue;
 
-				// set his velocity to fast upward (for now)
-				if(length(pTarget->m_Pos-ProjStartPos) > 0.0f)
-					GameServer()->CreateHammerHit(pTarget->m_Pos-normalize(pTarget->m_Pos-ProjStartPos)*GetProximityRadius()*0.5f);
-				else
-					GameServer()->CreateHammerHit(ProjStartPos);
-
 				vec2 Dir;
 				if (length(pTarget->m_Pos - m_Pos) > 0.0f)
 					Dir = normalize(pTarget->m_Pos - m_Pos);
 				else
 					Dir = vec2(0.f, -1.f);
 
-				pTarget->TakeDamage(vec2(0.f, -1.f) + normalize(Dir + vec2(0.f, -1.1f)) * 10.0f, Dir*-1, g_pData->m_Weapons.m_Hammer.m_pBase->m_Damage,
-					m_pPlayer->GetCID(), m_ActiveWeapon);
+				if (m_BallMode) {
+					pTarget->m_Core.m_Vel += normalize(Dir + vec2(0, -1.1f)) * 10.f;
+					GameServer()->CreateHammerHit(m_Pos); //pTarget->m_Pos is probably more correct but the original used m_Pos
+					if (pTarget->m_aWeapons[WEAPON_GRENADE].m_Got) {
+						GameServer()->Console()->Print(IConsole::OUTPUT_LEVEL_STANDARD, "char", "stolen");
+						pTarget->m_aWeapons[WEAPON_GRENADE].m_Got = false;
+			  		pTarget->SetWeapon(WEAPON_HAMMER);
+						//The player gets two ammo here, because at the end of the function it is reduced by one,
+						//resulting in getting one grenade
+						GiveWeapon(WEAPON_GRENADE, 2);
+			  		SetWeapon(WEAPON_GRENADE);
+					}
+					//Using IncreaseArmor(-HammerArmorLoss) does not work here if the player has full armor
+					pTarget->m_Armor = clamp(pTarget->m_Armor - HammerArmorLoss, 0, 10);
+				} else {
+					// set his velocity to fast upward (for now)
+					if(length(pTarget->m_Pos-ProjStartPos) > 0.0f)
+						GameServer()->CreateHammerHit(pTarget->m_Pos-normalize(pTarget->m_Pos-ProjStartPos)*GetProximityRadius()*0.5f);
+					else
+						GameServer()->CreateHammerHit(ProjStartPos);
+
+					pTarget->TakeDamage(vec2(0.f, -1.f) + normalize(Dir + vec2(0.f, -1.1f)) * 10.0f, Dir*-1, g_pData->m_Weapons.m_Hammer.m_pBase->m_Damage,
+						m_pPlayer->GetCID(), m_ActiveWeapon);
+				}
 				Hits++;
+			}
+
+			if (BigHammer && !Hits) {
+				//Do a second check for a larger area where the ball will not be stolen,
+				//but players are still affected.
+
+				Num = GameWorld()->FindEntities(m_Pos + Direction * GetProximityRadius() * 2.5f, GetProximityRadius() * 1.5f, (CEntity**)apEnts, MAX_CLIENTS, CGameWorld::ENTTYPE_CHARACTER);
+				//TODO: duplicate code
+				for (int i = 0; i < Num; i++)	{
+					CCharacter *pTarget = apEnts[i];
+
+					if ((pTarget == this) || GameServer()->Collision()->IntersectLine(ProjStartPos, pTarget->m_Pos, NULL, NULL))
+						continue;
+
+					vec2 Dir;
+					if (length(pTarget->m_Pos - m_Pos) > 0.0f)
+						Dir = normalize(pTarget->m_Pos - m_Pos);
+					else
+						Dir = vec2(0.f, -1.f);
+
+					pTarget->m_Core.m_Vel += normalize(Dir + vec2(0, -1.1f)) * 4.f;
+					GameServer()->CreateHammerHit(pTarget->m_Pos);
+					pTarget->m_Armor = clamp(pTarget->m_Armor - BigHammerArmorLoss, 0, 10);
+				}
 			}
 
 			// if we Hit anything, we have to wait for the reload
