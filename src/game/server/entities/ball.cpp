@@ -1,3 +1,5 @@
+#include <stdio.h>
+
 #include <game/server/gamecontext.h>
 #include <game/server/gamecontroller.h>
 
@@ -303,8 +305,10 @@ void CBall::Tick() {
         m_Direction = -Velocity;
       break;
       default:
-        GameServer()->SendBroadcast("This message should never appear", -1);
-        GameServer()->Console()->Print(IConsole::OUTPUT_LEVEL_STANDARD, "ballent", "CollidingPoints not in 1,2,3");
+        char str [500];
+        snprintf(str, sizeof(str), "%i colliding points", CollidingPoints);
+        GameServer()->SendBroadcast(str, -1);
+        GameServer()->Console()->Print(IConsole::OUTPUT_LEVEL_STANDARD, "ballent", str);
         if (GameServer()->Collision()->CheckPoint(ColPos.x, FreePos.y)) {
           Velocity.x = -Velocity.x;
         } else if (GameServer()->Collision()->CheckPoint(FreePos.x, ColPos.y)) {
