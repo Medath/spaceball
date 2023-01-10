@@ -28,8 +28,8 @@ void CGameControllerBALL::Tick()
 		//reset everything
 		m_PickupSpawned = false;
 		m_PickedupTick = 0;
-		//Respawn Ball in 5 seconds
-		m_PickupRespawnTick = Server()->Tick() + Server()->TickSpeed() * 5;
+		//Respawn Ball
+		m_PickupRespawnTick = Server()->Tick() + Server()->TickSpeed() * m_BallRespawnSeconds;
 	}
 
 	m_WasGameRunning = IsGameRunning();
@@ -47,8 +47,8 @@ void CGameControllerBALL::OnGoal(CPlayer *Scorer, int Team) {
 
 	m_PickupSpawned = false;
 	m_PickedupTick = 0;
-	//Respawn in 5 seconds
-	m_PickupRespawnTick = Server()->Tick() + Server()->TickSpeed() * 5;
+	//Respawn Ball
+	m_PickupRespawnTick = Server()->Tick() + Server()->TickSpeed() * m_BallRespawnSeconds;
 	m_aTeamscore[Team]++;
 
 	int ScorerID;
