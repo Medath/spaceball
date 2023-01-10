@@ -316,7 +316,7 @@ void CBall::Tick() {
     }
 
     m_Pos = vec2(FreePos.x - m_Direction.x * (Ct - FreeTime),
-                FreePos.y - (m_Direction.y * (Ct - FreeTime) * 2 * GameServer()->Tuning()->m_GrenadeCurvature / 10000 * GameServer()->Tuning()->m_GrenadeSpeed));
+                FreePos.y - (m_Direction.y + (Ct - FreeTime) * 2 * GameServer()->Tuning()->m_GrenadeCurvature / 10000 * GameServer()->Tuning()->m_GrenadeSpeed));
 
     //The start tick has to be reset after every bounce,
     //because otherwise GetPos() will return wrong coordinates
