@@ -17,6 +17,10 @@ CBall::CBall(CGameWorld *pGameWorld, int Owner, vec2 Pos, vec2 Dir, int Span)
   float largestAbs = abs(m_Direction.x) > abs(m_Direction.y) ? m_Direction.x : m_Direction.y;
   m_pickupAgain = abs(largestAbs * (float)Server()->TickSpeed() / GameServer()->Tuning()->m_GrenadeSpeed * 70.0);
 
+  char str[500];
+  snprintf(str, sizeof(str), "pos: %f, %f | dir: %f, %f", Pos.x, Pos.y, Dir.x, Dir.y);
+  GameServer()->SendChat(-1, CHAT_ALL, -1, str);
+
   GameWorld()->InsertEntity(this);
 }
 
