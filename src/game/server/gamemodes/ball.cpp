@@ -36,10 +36,9 @@ void CGameControllerBALL::Tick()
 }
 
 void CGameControllerBALL::OnCharacterSpawn(CCharacter *pChr) {
-	IGameController::OnCharacterSpawn(pChr);
-
+	pChr->IncreaseHealth(10);
 	pChr->IncreaseArmor(10);
-	pChr->SetWeapon(WEAPON_HAMMER);
+	pChr->GiveWeapon(WEAPON_HAMMER, -1);
 }
 
 void CGameControllerBALL::OnGoal(CPlayer *Scorer, int Team) {

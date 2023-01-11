@@ -64,7 +64,9 @@ bool CCharacter::Spawn(CPlayer *pPlayer, vec2 Pos)
 	m_EmoteStop = -1;
 	m_LastAction = -1;
 	m_LastNoAmmoSound = -1;
-	m_ActiveWeapon = WEAPON_GUN;
+	if (!m_BallMode) {
+		m_ActiveWeapon = WEAPON_GUN;
+	}
 	m_LastWeapon = WEAPON_HAMMER;
 	m_QueuedWeapon = -1;
 
@@ -445,6 +447,7 @@ void CCharacter::FireWeapon(bool Forced)
 				);
 
 				m_aWeapons[WEAPON_GRENADE].m_Got = false;
+				GiveWeapon(WEAPON_HAMMER, -1);
 			  SetWeapon(WEAPON_HAMMER);
 			} else {
 				new CProjectile(GameWorld(), WEAPON_GRENADE,
@@ -530,6 +533,9 @@ void CCharacter::HandleWeapons()
 
 bool CCharacter::GiveWeapon(int Weapon, int Ammo)
 {
+	if (m_BallMode && Weapon == WEAPON_GRENADE) {
+		m_aWeapons[WEAPON_HAMMER].m_Got = false;
+	} 
 	if(m_aWeapons[Weapon].m_Ammo < g_pData->m_Weapons.m_aId[Weapon].m_Maxammo || !m_aWeapons[Weapon].m_Got)
 	{
 		m_aWeapons[Weapon].m_Got = true;
