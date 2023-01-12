@@ -436,10 +436,10 @@ void CCharacter::FireWeapon(bool Forced)
 		case WEAPON_GRENADE:
 		{
 			if (m_BallMode) {
-				float speedFactor = (float) GameServer()->Tuning()->m_GrenadeSpeed / 10000.0f;
-				Direction.x += m_Core.m_Vel.x * speedFactor;
-				Direction.y += m_Core.m_Vel.y * speedFactor;
+				//used to be config option in the original
+				const int GrenadeStartSpeed = 560;
 
+				Direction += m_Core.m_Vel * ((float) GrenadeStartSpeed / 10000.f);
 				new CBall(GameWorld(), m_pPlayer->GetCID(),
 					ProjStartPos,
 					Direction,
