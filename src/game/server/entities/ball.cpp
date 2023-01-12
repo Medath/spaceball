@@ -17,10 +17,6 @@ CBall::CBall(CGameWorld *pGameWorld, int Owner, vec2 Pos, vec2 Dir, int Span)
   float largestAbs = abs(m_Direction.x) > abs(m_Direction.y) ? m_Direction.x : m_Direction.y;
   m_pickupAgain = abs(largestAbs * (float)Server()->TickSpeed() / GameServer()->Tuning()->m_GrenadeSpeed * 70.0);
 
-  char str[500];
-  snprintf(str, sizeof(str), "pos: %f, %f | dir: %f, %f", Pos.x, Pos.y, Dir.x, Dir.y);
-  GameServer()->SendChat(-1, CHAT_ALL, -1, str);
-
   GameWorld()->InsertEntity(this);
 }
 
@@ -196,6 +192,7 @@ void CBall::Tick() {
   //Count how many steps are left until the ball hits something?
   for (float i = Ct+Steps; i <= Nt; i += Steps) {
     vec2 TmpPos = GetPos(i);
+    TmpPos = vec2(floor(TmpPos.x), floor(TmpPos.y));
     if (GameServer()->Collision()->TestBox(TmpPos, vec2(10, 10), GameServer()->Collision()->COLFLAG_SOLID)) {
       break;
     }
@@ -209,6 +206,7 @@ void CBall::Tick() {
     //Step backwards to the previous tick to find the collision
     for (float St = Ct; St > Ct - 1.0f; St -= Steps) {
       vec2 SearchPos = GetPos(St);
+      SearchPos = vec2(floor(SearchPos.x), floor(SearchPos.y));
       if (!GameServer()->Collision()->TestBox(SearchPos, vec2(10, 10), GameServer()->Collision()->COLFLAG_SOLID)) {
         FreeTime = St;
         ColPos = GetPos(St+Steps);
@@ -220,6 +218,7 @@ void CBall::Tick() {
     if (shouldBeDestroyed) {
       //The ball was already colliding in the entire previous tick.
       //Something must be wrong so it will just be destroyed
+      GameServer()->SendChat(-1, CHAT_ALL, -1, "ball shouldBeDestroyed");
       GameWorld()->DestroyEntity(this);
     }
   } else {
@@ -229,6 +228,10 @@ void CBall::Tick() {
   }
 
   if (FreeTime < Nt - Steps) {
+    //ColPos has to be rounded down. The original casted it to int *every single time* it was used
+    //and the built-in round_to_int function (used by CheckPoint) also rounds up, so it's wrong
+    ColPos = vec2(floor(ColPos.x), floor(ColPos.y));
+
     bool coll[4] = {false};
     coll[0] = GameServer()->Collision()->CheckPoint(ColPos + vec2(5, 5));
     coll[1] = GameServer()->Collision()->CheckPoint(ColPos + vec2(5, -5));
@@ -311,7 +314,11 @@ void CBall::Tick() {
       default:
         char str [500];
         snprintf(str, sizeof(str), "%i colliding points", CollidingPoints);
-        GameServer()->SendBroadcast(str, -1);
+        GameServer()->SendChat(-1, CHAT_ALL, -1, str);
+        GameServer()->Console()->Print(IConsole::OUTPUT_LEVEL_STANDARD, "ballent", str);
+
+        snprintf(str, sizeof(str), "at %f, %f", ColPos.x, ColPos.y);
+        GameServer()->SendChat(-1, CHAT_ALL, -1, str);
         GameServer()->Console()->Print(IConsole::OUTPUT_LEVEL_STANDARD, "ballent", str);
         if (GameServer()->Collision()->CheckPoint(ColPos.x, FreePos.y)) {
           Velocity.x = -Velocity.x;
