@@ -625,10 +625,20 @@ void CCharacter::Tick()
 		const int BallArmorDecrease = 30;
 		const int ArmorRegenConst = 300;
 		const int BallPickupTick = GameServer()->m_pController->GetBallPickupTick();
+		const bool HookTeammates = false;
 
 		int ArmorRegenVar = 0; //var from the original
 
+		if (!HookTeammates && m_Core.m_HookedPlayer != -1 && GameServer()->m_apPlayers[m_Core.m_HookedPlayer]->GetTeam() == m_pPlayer->GetTeam()) {
+			//If HookTeammates is false, don't hook teammates.
+			//This solution here is not great, because it will still result in teammates getting hooked very briefly.
+			//But that's how it is in the original...
+			m_Core.m_HookState = HOOK_RETRACT_START;
+			m_Core.m_HookedPlayer = -1;
+		}
+
 		if (m_aWeapons[WEAPON_GRENADE].m_Got) {
+			//Decrease armor when holding the ball. Shoot it when all armor is gone
 			if (!m_Armor || (Server()->Tick() - BallPickupTick) % (int)((10.f / BallArmorDecrease) * Server()->TickSpeed()) == 0) {
 				if (--m_Armor <= 0) {
 					FireWeapon(true);
@@ -637,6 +647,7 @@ void CCharacter::Tick()
 			}
 		} else if (m_Armor < 10 &&
 							++ArmorRegenVar % (int)((10.f / (float)ArmorRegenConst) * Server()->TickSpeed()) == 0) {
+			//Restore armor when not holding the ball
 			m_Armor++;
 		}
 	}
