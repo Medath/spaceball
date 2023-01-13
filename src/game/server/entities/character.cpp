@@ -625,30 +625,56 @@ void CCharacter::Tick()
 		const int BallArmorDecrease = 30;
 		const int ArmorRegenConst = 300;
 		const int BallPickupTick = GameServer()->m_pController->GetBallPickupTick();
+		const int HookArmorDecreaseTickSpeed = (int) (float)Server()->TickSpeed() / 2;	//lose one armor per this many ticks. 0 for no Armor loss
 		const bool HookTeammates = false;
 
 		int ArmorRegenVar = 0; //var from the original
-
-		if (!HookTeammates && m_Core.m_HookedPlayer != -1 && GameServer()->m_apPlayers[m_Core.m_HookedPlayer]->GetTeam() == m_pPlayer->GetTeam()) {
-			//If HookTeammates is false, don't hook teammates.
-			//This solution here is not great, because it will still result in teammates getting hooked very briefly.
-			//But that's how it is in the original...
-			m_Core.m_HookState = HOOK_RETRACT_START;
-			m_Core.m_HookedPlayer = -1;
-		}
+		bool RestoreArmor = true;
 
 		if (m_aWeapons[WEAPON_GRENADE].m_Got) {
 			//Decrease armor when holding the ball. Shoot it when all armor is gone
-			if (!m_Armor || (Server()->Tick() - BallPickupTick) % (int)((10.f / BallArmorDecrease) * Server()->TickSpeed()) == 0) {
-				if (--m_Armor <= 0) {
-					FireWeapon(true);
-					m_Armor = 0;
+			RestoreArmor = false;
+			if ((Server()->Tick() - BallPickupTick) % (int)((10.f / BallArmorDecrease) * Server()->TickSpeed()) == 0) {
+				m_Armor = clamp(m_Armor - 1, 0, 10);
+			}
+		} 
+
+		if (m_Core.m_HookedPlayer != -1) {
+			CPlayer *pTarget = GameServer()->m_apPlayers[m_Core.m_HookedPlayer];
+			if (!HookTeammates && pTarget->GetTeam() == m_pPlayer->GetTeam()) {
+				//If HookTeammates is false, don't hook teammates.
+				//This solution here is not great, because it will still result in teammates getting hooked very briefly.
+				//But that's how it is in the original...
+				m_Core.m_HookState = HOOK_RETRACT_START;
+				m_Core.m_HookedPlayer = -1;
+			}
+		}
+		if (HookArmorDecreaseTickSpeed) {
+			//Lose armor from being hooked
+			//There is no efficient way to tell when oneself is hooked
+			//so loop through every player and check if they hooked us.
+			//
+			//Just decreasing the armor of m_Core.m_HookedPlayer does not work,
+			//because RestoreArmor will stay true and the armor will be restored.
+			//Solving this would require further extending the CCharacter Class,
+			//or looping through all players at a different point
+			for (int i = 0; i < MAX_CLIENTS; i++) {
+				CPlayer *p = GameServer()->m_apPlayers[i];
+				if (!p) { continue; }
+				CCharacter *c = p->GetCharacter();
+				if (c && c->m_Core.m_HookedPlayer == m_pPlayer->GetCID()) {
+					RestoreArmor = false;
+					if (c->m_Core.m_HookTick % HookArmorDecreaseTickSpeed == 0) {
+						m_Armor = clamp(m_Armor - 1, 0, 10);
+					}
 				}
 			}
-		} else if (m_Armor < 10 &&
-							++ArmorRegenVar % (int)((10.f / (float)ArmorRegenConst) * Server()->TickSpeed()) == 0) {
-			//Restore armor when not holding the ball
+		}
+		if (RestoreArmor && m_Armor < 10 &&	++ArmorRegenVar % (int)((10.f / (float)ArmorRegenConst) * Server()->TickSpeed()) == 0) {
 			m_Armor++;
+		}
+		if (m_Armor == 0 && m_ActiveWeapon == WEAPON_GRENADE) {
+			FireWeapon(true);
 		}
 	}
 
