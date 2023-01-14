@@ -178,9 +178,10 @@ public:
 			Called when a grenade CPickup is picked up in the "BALL" gamemode, or when a CBall projectile is picked up
 
 		Arguments:
+			PreviousOwner - The CPlayer who fired the ball that was now picked up. NULL if noone fired a ball
 			Char - the character that picked it up
 	*/
-	virtual void OnBallPickup(CCharacter *Char) {;}
+	virtual void OnBallPickup(CPlayer *PreviousOwner, CCharacter *Char) {;}
 
 	/*
 		Function: GetBallPickupTick

@@ -10,6 +10,7 @@ private:
 	bool m_WasGameRunning = false;
 	int m_PickupRespawnTick = -1;
 	int m_PickedupTick = 0;
+	int m_BallPasser = -1;
 
 public:
 	CGameControllerBALL(class CGameContext *pGameServer);
@@ -17,7 +18,7 @@ public:
 	virtual void OnCharacterSpawn(CCharacter *pChr);
 	virtual void OnGoal(CPlayer *Scorer, int team);
 	virtual void OnBallSpawn();
-	virtual void OnBallPickup(CCharacter *Char);
+	virtual void OnBallPickup(CPlayer *PreviousOwner, CCharacter *Char);
 	virtual int GetBallPickupTick();
 	virtual void OnBallTimeout();
 	virtual int GetPickupSpawnTick(int originalTick);

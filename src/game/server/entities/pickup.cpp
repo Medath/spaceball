@@ -80,7 +80,7 @@ void CPickup::Tick()
 					int Ammo;
 					if (m_BallMode) {
 						Ammo = 1;
-						GameServer()->m_pController->OnBallPickup(pChr);
+						GameServer()->m_pController->OnBallPickup(NULL, pChr);
 					} else {
 						Ammo = g_pData->m_Weapons.m_aId[WEAPON_GRENADE].m_Maxammo;
 					}

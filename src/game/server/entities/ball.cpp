@@ -177,7 +177,7 @@ void CBall::Tick() {
 
 	if(TargetChr) {
     //Character got the ball
-    GameServer()->m_pController->OnBallPickup(TargetChr);
+    GameServer()->m_pController->OnBallPickup(GameServer()->m_apPlayers[m_Owner], TargetChr);
     GameWorld()->DestroyEntity(this);
   } if (m_LifeSpan < 0) {
     //Ball was flying around for too long. Destroy it
