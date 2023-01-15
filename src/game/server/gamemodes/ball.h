@@ -14,6 +14,7 @@ private:
 
 public:
 	CGameControllerBALL(class CGameContext *pGameServer);
+	virtual bool DoWincheckMatch();
 	virtual void Tick();
 	virtual void OnCharacterSpawn(CCharacter *pChr);
 	virtual void OnGoal(CPlayer *Scorer, int team);

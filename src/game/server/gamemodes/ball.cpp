@@ -1,5 +1,6 @@
 #include <string>
 #include "ball.h"
+#include "engine/shared/config.h"
 #include "game/server/entities/character.h"
 #include "game/server/gamecontext.h"
 #include "game/server/player.h"
@@ -18,6 +19,22 @@ CGameControllerBALL::CGameControllerBALL(class CGameContext *pGameServer)
 	pGameServer->Tuning()->m_GrenadeLifetime = 40;
 	pGameServer->Tuning()->m_GrenadeSpeed = 530;
 	pGameServer->Tuning()->m_HookLength = 440;
+}
+
+bool CGameControllerBALL::DoWincheckMatch() {
+	// check score win condition
+	if((m_GameInfo.m_ScoreLimit > 0 && (m_aTeamscore[TEAM_RED] >= m_GameInfo.m_ScoreLimit || m_aTeamscore[TEAM_BLUE] >= m_GameInfo.m_ScoreLimit)) ||
+		(m_GameInfo.m_TimeLimit > 0 && (Server()->Tick()-m_GameStartTick) >= m_GameInfo.m_TimeLimit*Server()->TickSpeed()*60))
+	{
+		if(abs(m_aTeamscore[TEAM_RED] - m_aTeamscore[TEAM_BLUE]) >= Config()->m_SvRequiredScoreDifference)
+		{
+			EndMatch();
+			return true;
+		}
+		else
+			m_SuddenDeath = 1;
+	}
+	return false;
 }
 
 void CGameControllerBALL::Tick()
