@@ -647,6 +647,7 @@ void CCharacter::Tick()
 				//But that's how it is in the original...
 				m_Core.m_HookState = HOOK_RETRACT_START;
 				m_Core.m_HookedPlayer = -1;
+				GameServer()->Console()->Print(IConsole::OUTPUT_LEVEL_STANDARD, "char", "hook aborted due to team hooking");
 			}
 		}
 		if (HookArmorDecreaseTickSpeed) {
