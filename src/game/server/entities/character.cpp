@@ -343,12 +343,13 @@ void CCharacter::FireWeapon(bool Forced)
 					Dir = vec2(0.f, -1.f);
 
 				if (m_BallMode) {
+					//steal the ball
 					pTarget->m_Core.m_Vel += normalize(Dir + vec2(0, -1.1f)) * 10.f;
 					GameServer()->CreateHammerHit(m_Pos); //pTarget->m_Pos is probably more correct but the original used m_Pos
 					if (pTarget->m_aWeapons[WEAPON_GRENADE].m_Got) {
-						GameServer()->Console()->Print(IConsole::OUTPUT_LEVEL_DEBUG, "game", "ball stolen");
 						pTarget->m_aWeapons[WEAPON_GRENADE].m_Got = false;
 			  		pTarget->SetWeapon(WEAPON_HAMMER);
+						GameServer()->m_pController->OnBallPickup(NULL, this); //reset the ball passer
 						//The player gets two ammo here, because at the end of the function it is reduced by one,
 						//resulting in getting one grenade
 						GiveWeapon(WEAPON_GRENADE, 2);

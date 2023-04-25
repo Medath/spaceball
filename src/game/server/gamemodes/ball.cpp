@@ -84,11 +84,14 @@ void CGameControllerBALL::OnGoal(CPlayer *Scorer, int Team) {
 		//goal with pass
 		Scorer->m_Score++;
 		CPlayer *Passer = GameServer()->m_apPlayers[m_BallPasser];
+		BroadcastMsg += (std::string) " with a pass from ";
 		if (Passer) {
-			BroadcastMsg += (std::string) " with a pass from " + Server()->ClientName(Passer->GetCID());
-			m_aTeamscore[Team]++;
+			BroadcastMsg += Server()->ClientName(Passer->GetCID());
 			Passer->m_Score++;
+		} else {
+			BroadcastMsg += "u̵̮̬͇̲̣͑̉͊̆͌̂̑̔͝ṉ̵̢̜̦͈̹̼̖̱́̊̄̕͠k̵̮̤̳͕̪̈́̓̉͐̎͒n̶̠̤͕̩̊̈̾̅̈́͂͛̔͢ͅo̫̻͍̗͂͆̓͐͘͜͞ͅw̢̪̤̯͚̜͕̱̲͑̒́̔̉͗̌̂ñ̛̘̦̪̱̤̦̅̒̂̈́͂̍́͝";
 		}
+		m_aTeamscore[Team]++;
 	} else {
 		//boring goal
 		Scorer->m_Score++;
@@ -133,7 +136,8 @@ void CGameControllerBALL::OnBallPickup(CPlayer *PreviousOwner, CCharacter *Char)
   Char->SetWeapon(WEAPON_GRENADE);
 	m_PickedupTick = Server()->Tick();
 
-	//reset the ball passer if it was a self pass,
+	//reset the ball passer if previous owner is null,
+	//or if it was a self pass,
 	//or if the pass came from another team
 	if (!PreviousOwner
 			|| Char->GetPlayer()->GetTeam() != PreviousOwner->GetTeam()
