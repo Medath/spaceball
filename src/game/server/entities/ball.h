@@ -22,6 +22,10 @@ private:
   int m_LifeSpan;
 	int m_StartTick;
 	int m_pickupAgain;
+
+	vec2 client_Pos; //"fake" Position sent to client
+	int client_StartTick; //"fake" StartTick sent to client
+	
 };
 
 #endif

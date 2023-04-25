@@ -1,3 +1,4 @@
+#include <string>
 #include <stdio.h>
 
 #include <game/server/gamecontext.h>
@@ -13,6 +14,9 @@ CBall::CBall(CGameWorld *pGameWorld, int Owner, vec2 Pos, vec2 Dir, int Span)
 	m_StartTick = Server()->Tick();
   m_Owner = Owner;
   m_LifeSpan = Span;
+
+  client_Pos = m_Pos;
+  client_StartTick = m_StartTick;
 
   float largestAbs = abs(m_Direction.x) > abs(m_Direction.y) ? m_Direction.x : m_Direction.y;
   m_pickupAgain = abs(largestAbs * (float)Server()->TickSpeed() / GameServer()->Tuning()->m_GrenadeSpeed * 70.0);
@@ -332,10 +336,12 @@ void CBall::Tick() {
 
     m_Pos = vec2(FreePos.x - m_Direction.x * (Ct - FreeTime),
                 FreePos.y - (m_Direction.y + (Ct - FreeTime) * 2 * GameServer()->Tuning()->m_GrenadeCurvature / 10000 * GameServer()->Tuning()->m_GrenadeSpeed));
+    client_Pos = m_Pos;
 
     //The start tick has to be reset after every bounce,
     //because otherwise GetPos() will return wrong coordinates
     m_StartTick = Server()->Tick();
+    client_StartTick = m_StartTick;
 
     m_pickupAgain = 0;
   }
@@ -352,11 +358,21 @@ void CBall::Tick() {
 void CBall::TickPaused() { ++m_StartTick; }
 
 void CBall::FillInfo(CNetObj_Projectile *pProj) {
-  pProj->m_X = (int)m_Pos.x;
-  pProj->m_Y = (int)m_Pos.y;
-  pProj->m_VelX = (int)(m_Direction.x*100.0f);
-  pProj->m_VelY = (int)(m_Direction.y*100.0f);
-  pProj->m_StartTick = m_StartTick;
+  if (Server()->Tick() % Server()->TickSpeed() == 0) {
+    //update position for the client every second. This is done to continuously correct
+    //slight mispredictions that occur due to sending rounded values to the client
+    client_Pos = CalcPos(m_Pos, m_Direction,
+      GameServer()->Tuning()->m_GrenadeCurvature,
+      GameServer()->Tuning()->m_GrenadeSpeed,
+      (Server()->Tick() - 1 - m_StartTick)/(float)Server()->TickSpeed()
+    );
+    client_StartTick = Server()->Tick() - 1;
+  }
+  pProj->m_X = (int)client_Pos.x;
+  pProj->m_Y = (int)client_Pos.y;
+  pProj->m_VelX = (int) (m_Direction.x*100.0f);
+  pProj->m_VelY = (int) (m_Direction.y*100.0f);
+  pProj->m_StartTick = client_StartTick;
   pProj->m_Type = WEAPON_GRENADE;
 }
 
