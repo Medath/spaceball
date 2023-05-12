@@ -68,8 +68,9 @@ void CGameControllerBALL::OnGoal(CPlayer *Scorer, int Team) {
 	if (Scorer) {
 		ScorerID = Scorer->GetCID();
 		BroadcastMsg += Server()->ClientName(Scorer->GetCID());
+		Scorer->m_Score += Team == Scorer->GetTeam() ? +1 : -1;
 	} else {
-		BroadcastMsg += "Unknown Tee";
+		BroadcastMsg += "u̵̮̬͇̲̣͑̉͊̆͌̂̑̔͝ṉ̵̢̜̦͈̹̼̖̱́̊̄̕͠k̵̮̤̳͕̪̈́̓̉͐̎͒n̶̠̤͕̩̊̈̾̅̈́͂͛̔͢ͅo̫̻͍̗͂͆̓͐͘͜͞ͅw̢̪̤̯͚̜͕̱̲͑̒́̔̉͗̌̂ñ̛̘̦̪̱̤̦̅̒̂̈́͂̍́͝";
 		ScorerID = MAX_PLAYERS - 1;
 	}
 
@@ -77,12 +78,8 @@ void CGameControllerBALL::OnGoal(CPlayer *Scorer, int Team) {
 	BroadcastMsg += Team == TEAM_BLUE ? "blue" : "red";
 	BroadcastMsg += " team";
 	
-	if (Team != Scorer->GetTeam()) {
-		//own goal
-		Scorer->m_Score--;
-	} else if (m_BallPasser != -1) {
+	if (m_BallPasser != -1) {
 		//goal with pass
-		Scorer->m_Score++;
 		CPlayer *Passer = GameServer()->m_apPlayers[m_BallPasser];
 		BroadcastMsg += (std::string) " with a pass from ";
 		if (Passer) {
@@ -92,11 +89,8 @@ void CGameControllerBALL::OnGoal(CPlayer *Scorer, int Team) {
 			BroadcastMsg += "u̵̮̬͇̲̣͑̉͊̆͌̂̑̔͝ṉ̵̢̜̦͈̹̼̖̱́̊̄̕͠k̵̮̤̳͕̪̈́̓̉͐̎͒n̶̠̤͕̩̊̈̾̅̈́͂͛̔͢ͅo̫̻͍̗͂͆̓͐͘͜͞ͅw̢̪̤̯͚̜͕̱̲͑̒́̔̉͗̌̂ñ̛̘̦̪̱̤̦̅̒̂̈́͂̍́͝";
 		}
 		m_aTeamscore[Team]++;
-	} else {
-		//boring goal
-		Scorer->m_Score++;
 	}
- 
+
 	BroadcastMsg += "!";
 	GameServer()->SendBroadcast(BroadcastMsg.c_str(), -1);
 	GameServer()->Console()->Print(IConsole::OUTPUT_LEVEL_STANDARD, "ball", BroadcastMsg.c_str());
