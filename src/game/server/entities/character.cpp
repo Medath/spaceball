@@ -348,6 +348,7 @@ void CCharacter::FireWeapon(bool Forced)
 					GameServer()->CreateHammerHit(m_Pos); //pTarget->m_Pos is probably more correct but the original used m_Pos
 					if (pTarget->m_aWeapons[WEAPON_GRENADE].m_Got) {
 						pTarget->m_aWeapons[WEAPON_GRENADE].m_Got = false;
+			  		pTarget->GiveWeapon(WEAPON_HAMMER, -1);
 			  		pTarget->SetWeapon(WEAPON_HAMMER);
 						GameServer()->m_pController->OnBallPickup(NULL, this); //reset the ball passer
 						//The player gets two ammo here, because at the end of the function it is reduced by one,
